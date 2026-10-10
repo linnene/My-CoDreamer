@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+._*
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# 依赖
+node_modules/
+vendor/
+
+# 构建产物
+dist/
+build/
+out/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
