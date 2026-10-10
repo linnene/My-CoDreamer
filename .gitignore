@@ -28,6 +28,7 @@ __pycache__/
 .venv/
 venv/
 
-# 论文 / 参考资料（体积大，不入库）
+# 论文 / 参考资料 / 笔记（本地留存，不入库）
 assets/*.pdf
 assets/**/*.pdf
+assets/*.md
