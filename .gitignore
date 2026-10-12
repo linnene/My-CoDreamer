@@ -15,6 +15,8 @@
 # 依赖
 node_modules/
 vendor/
+.venv/
+venv/
 
 # 构建产物
 dist/
@@ -25,8 +27,18 @@ out/
 # Python
 __pycache__/
 *.py[cod]
-.venv/
-venv/
+*.egg-info/
+.pytest_cache/
+
+# 训练产物（日志 / checkpoint / 录像）
+logdir/
+logdirs/
+runs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+wandb/
 
 # 论文 / 参考资料 / 笔记（本地留存，不入库）
 assets/*.pdf
