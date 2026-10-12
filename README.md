@@ -75,7 +75,8 @@ powershell -ExecutionPolicy Bypass -File scripts\run_smoke.ps1
 结构上与后续要接入的 VMAS 最接近。所有参数覆盖都走命令行，
 **上游 `configs.yaml` 保持原样**。
 
-日志输出到 `logdir/smoke/`（已 gitignore），跑完请回传整个目录。
+日志输出到 `logdir/smoke/`。该目录是**步骤 0 的冒烟证据，随仓库回传**
+（`logdir/` 下其余内容仍 gitignore；`latest.pt` 因超 GitHub 单文件上限而不入库）。
 
 ## 已确认的行事约定
 

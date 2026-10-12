@@ -156,7 +156,48 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 
 | 文件 | 改动 | 阶段 | 标注 |
 |---|---|---|---|
-| （暂无） | | | |
+| `dreamer.py` | 第 7 行 `os.environ["MUJOCO_GL"] = "osmesa"` → `setdefault(...)`，允许外部覆盖 | 步骤 0 | `# [CoDreamer]` |
+
+### 步骤 0 远端实测记录（2026-10-12, Windows + RTX 4060 Laptop 8GB）
+
+环境：`.venv`（Python 3.10.8）+ `torch 2.4.1+cu121`。注意 PyPI 上 Windows 的 torch
+默认 wheel 是 **CPU 版**（装完是 `2.4.1+cpu`），必须走 `--index-url https://download.pytorch.org/whl/cu121`。
+其余按 `requirements.txt` 对齐（numpy 1.23.5 / gym 0.22.0 / mujoco 2.3.5 / dm_control 1.0.9）。
+
+跑通原版 dreamerv3-torch 时踩到的平台问题（均已在脚手架侧处理）：
+
+| # | 现象 | 根因 | 处理 |
+|---|---|---|---|
+| 1 | `run_smoke.ps1` 解析报错，中文乱码 | 文件是 UTF-8 **无 BOM**，PS 5.1 按 GBK 读；且 Windows 检查脚本用 `python - @"..."@` 把 here-string 当成了命令行**参数**而非 stdin，python 转进 REPL | 改 `@"..."@ \| python -`；文件转 UTF-8 with BOM |
+| 2 | 完整性校验 24/24 全部 FAILED | Windows `core.autocrlf=true` 在检出时把 LF 转了 CRLF，而清单是在 Mac 上按 LF 生成的；另 `rel.lstrip("./")` 会吃掉 `.gitignore` 的首点 | 新增 `.gitattributes`（`third_party/dreamerv3-torch/** -text`）并重新检出，使「清单不一致 == 真的改了」成立；`lstrip` → `rel[2:]` |
+| 3 | 训练进程一起就退出 | PS 5.1 在 `$ErrorActionPreference="Stop"` 下，`2>&1 \|` 会把原生程序 stderr（Gym 弃用警告）升级成终止性错误 | 训练调用处临时置 `Continue`，改用 `$LASTEXITCODE` 判成败 |
+| 4 | `ImportError: Unable to load OpenGL library ... OSMesa` | `dreamer.py` 写死 `MUJOCO_GL=osmesa`，Windows 上没有 OSMesa；而 `envs/dmc.py` 每步都 `render()`，必须有真 GL 后端 | 上游改为 `setdefault`（见上表），Windows 脚本设 `MUJOCO_GL=glfw` |
+| 5 | 冒烟测试远超「几分钟」 | `Every(batch_size*batch_length / train_ratio)`：冒烟把 batch 砍到 `2×8=16`，`train_ratio` 仍是 512 → `Every(0.03125)` = **每环境步 32 次梯度更新**（真实配置是每 2 步 1 次） | `.sh` / `.ps1` 均已覆盖 `--train_ratio 8` → `Every(16/8)=Every(2)`，与真实配置同频 |
+
+### 步骤 0 结论：冒烟通过
+
+`powershell -ExecutionPolicy Bypass -File scripts\run_smoke.ps1` 退出码 0，全程 **2 分 18 秒**
+（dmc_proprio / dmc_walker_walk；循环内 1500 训练环境步 + 3 次评估，另加 prefill 200）。
+
+可判据（全部出自 `logdir/smoke/`）：
+
+- `model_loss` 28.7 → 18.5 → 16.8 → 14.3 单调下降 → **L1（代码跑通、损失下降）达成**。
+- `update_count` 严格对账：末次标量日志 `update_count 725`，而此时 `_step = 2900/2 = 1450`，
+  即 `100 (pretrain) + (1450-200)/2 = 725` —— 与 `Every(2)` 严丝合缝。
+  （修 `train_ratio` 前，这个数会是同一区间的 ~32 倍。）
+- `eval_return` 36.4 / 43.2 / 33.3。冒烟**只验链路不验效果**，3 条 episode 的波动无意义。
+- 退出条件自洽：`while agent._step < steps//action_repeat + eval_every//action_repeat`
+  = `2000//2 + 1000//2 = 1500`，对上日志末行 `logger.step 3000`（=2×1500）与 `dataset_size 1500`。
+
+未验证：CoDreamer、多智能体、VMAS、任何学习效果。
+
+### 回传证据的入库策略
+
+证据入库到 `logdir/smoke/`（run.log / metrics.jsonl / tfevents / 6 个轨迹 npz，约 8.5 MB）。
+为此 `.gitignore` 开了**窄口子**：`logdir/*` + `!logdir/smoke/` + `!logdir/smoke/*.log`。
+仍不入库的：`latest.pt`（219 MB，超 GitHub 单文件 100 MB 上限）与调试目录 `logdir/_smoke_train_ratio_bug/`。
+`run.log` 原本被 PowerShell 5.1 的 `Tee-Object` 写成 UTF-16LE，**已无损转成 UTF-8**（16534 → 8278 字节，
+往返校验一致）以便 diff / grep。
 
 ## 6. 相关文档
 

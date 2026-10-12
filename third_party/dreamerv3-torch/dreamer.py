@@ -4,7 +4,10 @@ import os
 import pathlib
 import sys
 
-os.environ["MUJOCO_GL"] = "osmesa"
+# [CoDreamer] 上游无条件写死 osmesa；Windows 上没有 OSMesa，dm_control 会 ImportError。
+# [CoDreamer] 改为默认值不变、允许外部覆盖（远端 Windows 用 MUJOCO_GL=glfw）。
+# [CoDreamer] 登记于 docs/reproduction-plan.md「改动清单」。
+os.environ.setdefault("MUJOCO_GL", "osmesa")
 
 import numpy as np
 import ruamel.yaml as yaml

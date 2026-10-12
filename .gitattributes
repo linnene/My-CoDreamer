@@ -1,0 +1,4 @@
+# 上游文件必须与 UPSTREAM_MANIFEST.sha256 逐字节一致。
+# Windows 上 core.autocrlf=true 会把 LF 转成 CRLF，导致清单校验 24/24 全部误报 FAILED。
+# 这里禁用 git 的换行符转换，保证「清单不一致 == 我们真的改了」这一不变式成立。
+third_party/dreamerv3-torch/** -text

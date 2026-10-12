@@ -56,6 +56,8 @@ cd "$D3T"
 
 # 所有覆盖都走命令行 —— 上游 configs.yaml 保持原样。
 # dmc_proprio：向量观测 + MLP 编解码器，结构与 VMAS 最接近，无需 CNN。
+# train_ratio 必须跟着 batch 一起缩：_should_train = Every(batch_size*batch_length/train_ratio)，
+# 真实配置是 Every(16*64/512)=Every(2)；batch 砍成 2*8 后仍用 512 会变成每环境步 32 次更新。
 python dreamer.py \
   --configs dmc_proprio \
   --task dmc_walker_walk \
@@ -65,6 +67,7 @@ python dreamer.py \
   --prefill 200 \
   --batch_size 2 \
   --batch_length 8 \
+  --train_ratio 8 \
   --envs 1 \
   --eval_every 1000 \
   --eval_episode_num 1 \

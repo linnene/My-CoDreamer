@@ -24,6 +24,9 @@ build/
 out/
 *.log
 
+# 例外：步骤 0 冒烟的训练 stdout 属于回传证据
+!logdir/smoke/*.log
+
 # Python
 __pycache__/
 *.py[cod]
@@ -31,7 +34,10 @@ __pycache__/
 .pytest_cache/
 
 # 训练产物（日志 / checkpoint / 录像）
-logdir/
+# 例外：logdir/smoke/ 是步骤 0 的冒烟证据，入库回传；
+# latest.pt（219MB，超 GitHub 单文件 100MB 上限）由下面的 *.pt 规则继续忽略。
+logdir/*
+!logdir/smoke/
 logdirs/
 runs/
 checkpoints/

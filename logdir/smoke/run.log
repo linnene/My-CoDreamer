@@ -1,0 +1,66 @@
+python : Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+所在位置 D:\dev\My-CoDreamer\scripts\run_smoke.ps1:84 字符: 1
++ python -u dreamer.py `
++ ~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Gym has been un... functionality.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and req
+uest that they upgrade.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+Logdir D:\dev\My-CoDreamer\logdir\smoke
+Create envs.
+D:\dev\My-CoDreamer\.venv\lib\site-packages\gym\spaces\box.py:78: UserWarning: [33mWARN: Box bound precision lowered b
+y casting to float32[0m
+  logger.warn(f"Box bound precision lowered by casting to {self.dtype}")
+Action Space Box(-1.0, 1.0, (6,), float32)
+Prefill dataset (200 steps).
+Logger: (400 steps).
+Simulate agent.
+Encoder CNN shapes: {}
+Encoder MLP shapes: {'height': (1,), 'orientations': (14,), 'velocity': (9,)}
+Decoder CNN shapes: {}
+Decoder MLP shapes: {'height': (1,), 'orientations': (14,), 'velocity': (9,)}
+D:\dev\My-CoDreamer\third_party\dreamerv3-torch\tools.py:747: FutureWarning: `torch.cuda.amp.GradScaler(args...)` is de
+precated. Please use `torch.amp.GradScaler('cuda', args...)` instead.
+  self._scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+Optimizer model_opt has 16469784 variables.
+Optimizer actor_opt has 1056780 variables.
+Optimizer value_opt has 1181439 variables.
+[400] 
+Start evaluation.
+[400] eval_return 36.4 / eval_length 500.0 / eval_episodes 1.0
+Start training.
+WARNING:py.warnings:D:\dev\My-CoDreamer\third_party\dreamerv3-torch\models.py:116: FutureWarning: `torch.cuda.amp.autoc
+ast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(self._use_amp):
+
+WARNING:py.warnings:D:\dev\My-CoDreamer\third_party\dreamerv3-torch\models.py:160: FutureWarning: `torch.cuda.amp.autoc
+ast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(self._use_amp):
+
+WARNING:py.warnings:D:\dev\My-CoDreamer\third_party\dreamerv3-torch\models.py:299: FutureWarning: `torch.cuda.amp.autoc
+ast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(self._use_amp):
+
+WARNING:py.warnings:D:\dev\My-CoDreamer\third_party\dreamerv3-torch\models.py:323: FutureWarning: `torch.cuda.amp.autoc
+ast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with torch.cuda.amp.autocast(self._use_amp):
+
+[400] model_loss 28.7 / model_grad_norm 145.2 / height_loss 0.2 / orientations_loss 3.1 / velocity_loss 16.9 / reward_loss 3.5 / cont_loss 0.0 / kl_free 1.0 / dyn_scale 0.5 / rep_scale 0.1 / dyn_loss 8.4 / rep_loss 8.4 / kl 8.4 / prior_ent 106.5 / post_ent 100.4 / normed_target_mean 0.1 / normed_target_std 0.1 / normed_target_min 0.0 / normed_target_max 0.2 / EMA_005 0.0 / EMA_095 0.0 / value_mean 0.0 / value_std 0.0 / value_min 0.0 / value_max 0.0 / target_mean 0.1 / target_std 0.1 / target_min 0.0 / target_max 0.2 / imag_reward_mean 0.0 / imag_reward_std 0.0 / imag_reward_min 0.0 / imag_reward_max 0.0 / imag_action_mean -0.1 / imag_action_std 0.7 / imag_action_min -1.0 / imag_action_max 1.0 / actor_entropy 8.0 / actor_loss -0.1 / actor_grad_norm 0.0 / value_loss 9.2 / value_grad_norm 15.4 / update_count 100.0 / fps 0.0
+[900] model_loss 18.5 / model_grad_norm 97.0 / height_loss 0.1 / orientations_loss 2.6 / velocity_loss 7.5 / reward_loss 1.0 / cont_loss 0.0 / kl_free 1.0 / dyn_scale 0.5 / rep_scale 0.1 / dyn_loss 12.2 / rep_loss 12.2 / kl 12.2 / prior_ent 100.3 / post_ent 88.1 / normed_target_mean 0.4 / normed_target_std 0.2 / normed_target_min 0.0 / normed_target_max 0.6 / EMA_005 0.0 / EMA_095 0.4 / value_mean 0.0 / value_std 0.0 / value_min 0.0 / value_max 0.0 / target_mean 0.4 / target_std 0.2 / target_min 0.1 / target_max 0.7 / imag_reward_mean 0.1 / imag_reward_std 0.0 / imag_reward_min 0.1 / imag_reward_max 0.1 / imag_action_mean -0.3 / imag_action_std 0.7 / imag_action_min -1.0 / imag_action_max 1.0 / actor_entropy 8.3 / actor_loss -0.4 / actor_grad_norm 0.0 / value_loss 6.6 / value_grad_norm 13.3 / update_count 225.0 / fps 29.7
+[1000] dataset_size 500.0 / train_return 38.3 / train_length 500.0 / train_episodes 1.0
+[1400] 
+Start evaluation.
+[1400] eval_return 43.2 / eval_length 500.0 / eval_episodes 1.0
+Start training.
+[1400] model_loss 16.8 / model_grad_norm 80.8 / height_loss 0.0 / orientations_loss 3.4 / velocity_loss 5.3 / reward_loss 0.8 / cont_loss 0.0 / kl_free 1.0 / dyn_scale 0.5 / rep_scale 0.1 / dyn_loss 12.0 / rep_loss 12.0 / kl 12.0 / prior_ent 94.3 / post_ent 82.1 / normed_target_mean 0.4 / normed_target_std 0.2 / normed_target_min 0.1 / normed_target_max 0.7 / EMA_005 0.1 / EMA_095 0.7 / value_mean 0.2 / value_std 0.0 / value_min 0.2 / value_max 0.2 / target_mean 0.5 / target_std 0.2 / target_min 0.2 / target_max 0.8 / imag_reward_mean 0.1 / imag_reward_std 0.0 / imag_reward_min 0.1 / imag_reward_max 0.1 / imag_action_mean -0.3 / imag_action_std 0.7 / imag_action_min -1.0 / imag_action_max 1.0 / actor_entropy 8.4 / actor_loss -0.4 / actor_grad_norm 0.0 / value_loss 4.0 / value_grad_norm 7.6 / update_count 350.0 / fps 22.1
+[1900] model_loss 15.3 / model_grad_norm 69.0 / height_loss 0.0 / orientations_loss 2.9 / velocity_loss 4.6 / reward_loss 0.8 / cont_loss 0.0 / kl_free 1.0 / dyn_scale 0.5 / rep_scale 0.1 / dyn_loss 11.6 / rep_loss 11.6 / kl 11.6 / prior_ent 88.1 / post_ent 76.3 / normed_target_mean 0.4 / normed_target_std 0.2 / normed_target_min 0.1 / normed_target_max 0.7 / EMA_005 0.3 / EMA_095 0.8 / value_mean 0.3 / value_std 0.0 / value_min 0.3 / value_max 0.3 / target_mean 0.7 / target_std 0.2 / target_min 0.4 / target_max 1.0 / imag_reward_mean 0.1 / imag_reward_std 0.0 / imag_reward_min 0.1 / imag_reward_max 0.1 / imag_action_mean -0.3 / imag_action_std 0.7 / imag_action_min -1.0 / imag_action_max 1.0 / actor_entropy 8.5 / actor_loss -0.4 / actor_grad_norm 0.0 / value_loss 3.5 / value_grad_norm 6.1 / update_count 475.0 / fps 28.3
+[2000] dataset_size 1000.0 / train_return 41.0 / train_length 500.0 / train_episodes 2.0
+[2400] 
+Start evaluation.
+[2400] eval_return 33.3 / eval_length 500.0 / eval_episodes 1.0
+Start training.
+[2400] model_loss 14.3 / model_grad_norm 59.4 / height_loss 0.0 / orientations_loss 2.2 / velocity_loss 4.3 / reward_loss 0.8 / cont_loss 0.0 / kl_free 1.0 / dyn_scale 0.5 / rep_scale 0.1 / dyn_loss 11.7 / rep_loss 11.7 / kl 11.7 / prior_ent 82.1 / post_ent 69.6 / normed_target_mean 0.5 / normed_target_std 0.2 / normed_target_min 0.1 / normed_target_max 0.7 / EMA_005 0.4 / EMA_095 1.0 / value_mean 0.4 / value_std 0.0 / value_min 0.4 / value_max 0.4 / target_mean 0.9 / target_std 0.2 / target_min 0.5 / target_max 1.1 / imag_reward_mean 0.1 / imag_reward_std 0.0 / imag_reward_min 0.1 / imag_reward_max 0.1 / imag_action_mean -0.3 / imag_action_std 0.7 / imag_action_min -1.0 / imag_action_max 1.0 / actor_entropy 8.5 / actor_loss -0.4 / actor_grad_norm 0.0 / value_loss 3.3 / value_grad_norm 6.5 / update_count 600.0 / fps 21.2
+[2900] model_loss 12.6 / model_grad_norm 49.9 / height_loss 0.0 / orientations_loss 1.5 / velocity_loss 3.8 / reward_loss 0.8 / cont_loss 0.0 / kl_free 1.0 / dyn_scale 0.5 / rep_scale 0.1 / dyn_loss 10.9 / rep_loss 10.9 / kl 10.9 / prior_ent 75.4 / post_ent 63.6 / normed_target_mean 0.4 / normed_target_std 0.2 / normed_target_min 0.1 / normed_target_max 0.7 / EMA_005 0.5 / EMA_095 1.1 / value_mean 0.5 / value_std 0.0 / value_min 0.5 / value_max 0.5 / target_mean 1.0 / target_std 0.2 / target_min 0.6 / target_max 1.2 / imag_reward_mean 0.1 / imag_reward_std 0.0 / imag_reward_min 0.1 / imag_reward_max 0.1 / imag_action_mean -0.4 / imag_action_std 0.7 / imag_action_min -1.0 / imag_action_max 1.0 / actor_entropy 8.5 / actor_loss -0.4 / actor_grad_norm 0.0 / value_loss 3.1 / value_grad_norm 5.1 / update_count 725.0 / fps 28.4
+[3000] dataset_size 1500.0 / train_return 39.1 / train_length 500.0 / train_episodes 3.0
