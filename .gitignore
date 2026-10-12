@@ -24,9 +24,6 @@ build/
 out/
 *.log
 
-# 例外：步骤 0 冒烟的训练 stdout 属于回传证据
-!logdir/smoke/*.log
-
 # Python
 __pycache__/
 *.py[cod]
@@ -34,10 +31,16 @@ __pycache__/
 .pytest_cache/
 
 # 训练产物（日志 / checkpoint / 录像）
-# 例外：logdir/smoke/ 是步骤 0 的冒烟证据，入库回传；
-# latest.pt（219MB，超 GitHub 单文件 100MB 上限）由下面的 *.pt 规则继续忽略。
+#
+# 证据回传策略：只有小体积**文本**证据入库；二进制（tfevents / npz / 录像 / 权重）
+# 一律不入库 —— 它们可重新生成，且会让仓库体积单调增长。
+# 白名单是显式的：要新增一种文本证据，必须在这里显式开口子。
+# 详见 docs/reproduction-plan.md。
 logdir/*
 !logdir/smoke/
+logdir/smoke/*
+!logdir/smoke/*.log
+!logdir/smoke/*.jsonl
 logdirs/
 runs/
 checkpoints/

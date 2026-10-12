@@ -59,9 +59,30 @@ CoCoMARL workshop @ RLC 2024，Edan Toledo / Amanda Prorok）。**无官方代�
 
 **结论：论文作者基本是拿 DreamerV3 官方默认超参跑的，只把 `pretrain` 从 100 改成 500。**
 
-推断出的额外信息：`train_ratio: 512`（论文未提）。其含义为
-`Every(batch_size * batch_length / train_ratio) = Every(1024/512) = Every(2)`
-—— **每 2 个环境步做 1 次梯度更新**。
+推断出的额外信息：`train_ratio: 512`（论文未提）。
+
+### 训练强度公式（易错，已更正一次）
+
+```
+每次梯度更新所需环境步 = (batch_size × batch_length / train_ratio) × action_repeat
+```
+
+因为 `_should_train = Every(batch_steps / train_ratio)` 作用在
+`self._step = logger.step // action_repeat` 上，而不是直接作用在环境步上。
+
+代入实际配置：`Every(16×64/512) = Every(2)`，再乘 `action_repeat`：
+
+| 平台 | `action_repeat` | 更新频率 | 500k 环境步的更新次数 |
+|---|---|---|---|
+| DMC（冒烟用的） | 2 | 每 **4** 个环境步 1 次 | ~12.5 万 |
+| **VMAS**（待确认） | 1（推测） | 每 **2** 个环境步 1 次 | ~25 万 |
+
+两个后果，都会影响算力预算：
+
+1. 我最初写的「每 2 个环境步 1 次」是错的，正确值是每 4 个环境步 1 次（DMC）
+2. **`action_repeat` 会直接放大训练强度**。换到 VMAS 时如果它用 `action_repeat=1`，
+   训练强度会**自动翻倍** —— 这是 `action_repeat` 与 `train_ratio` 之间一个不显眼的耦合，
+   接 VMAS 前必须先确认它的取值
 
 ## 3. 待拍板的结构性问题
 
@@ -144,7 +165,7 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 
 ### 硬件成本现实
 
-`train_ratio: 512` → 每 2 环境步 1 次梯度更新 → 500k 环境步 = **25 万次梯度更新**，
+按上面的公式，DMC 下 500k 环境步 ≈ **12.5 万次梯度更新**（换到 VMAS 可能翻倍），
 且加入 agent 维度后有效 batch 还要 ×N。4060 8GB 上这是硬瓶颈。
 
 因此复现阶段**必须缩减规模**：先 100k 环境步而非 500k，随机种子数也要减少。
@@ -172,7 +193,7 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | 2 | 完整性校验 24/24 全部 FAILED | Windows `core.autocrlf=true` 在检出时把 LF 转了 CRLF，而清单是在 Mac 上按 LF 生成的；另 `rel.lstrip("./")` 会吃掉 `.gitignore` 的首点 | 新增 `.gitattributes`（`third_party/dreamerv3-torch/** -text`）并重新检出，使「清单不一致 == 真的改了」成立；`lstrip` → `rel[2:]` |
 | 3 | 训练进程一起就退出 | PS 5.1 在 `$ErrorActionPreference="Stop"` 下，`2>&1 \|` 会把原生程序 stderr（Gym 弃用警告）升级成终止性错误 | 训练调用处临时置 `Continue`，改用 `$LASTEXITCODE` 判成败 |
 | 4 | `ImportError: Unable to load OpenGL library ... OSMesa` | `dreamer.py` 写死 `MUJOCO_GL=osmesa`，Windows 上没有 OSMesa；而 `envs/dmc.py` 每步都 `render()`，必须有真 GL 后端 | 上游改为 `setdefault`（见上表），Windows 脚本设 `MUJOCO_GL=glfw` |
-| 5 | 冒烟测试远超「几分钟」 | `Every(batch_size*batch_length / train_ratio)`：冒烟把 batch 砍到 `2×8=16`，`train_ratio` 仍是 512 → `Every(0.03125)` = **每环境步 32 次梯度更新**（真实配置是每 2 步 1 次） | `.sh` / `.ps1` 均已覆盖 `--train_ratio 8` → `Every(16/8)=Every(2)`，与真实配置同频 |
+| 5 | 冒烟测试远超「几分钟」 | `Every(batch_size*batch_length / train_ratio)`：冒烟把 batch 砍到 `2×8=16`，`train_ratio` 仍是 512 → `Every(0.03125)` = **每环境步 32 次梯度更新**（真实配置是每 4 个环境步 1 次） | `.sh` / `.ps1` 均已覆盖 `--train_ratio 8` → `Every(16/8)=Every(2)`，与真实配置同频 |
 
 ### 步骤 0 结论：冒烟通过
 
@@ -193,11 +214,40 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 
 ### 回传证据的入库策略
 
-证据入库到 `logdir/smoke/`（run.log / metrics.jsonl / tfevents / 6 个轨迹 npz，约 8.5 MB）。
-为此 `.gitignore` 开了**窄口子**：`logdir/*` + `!logdir/smoke/` + `!logdir/smoke/*.log`。
-仍不入库的：`latest.pt`（219 MB，超 GitHub 单文件 100 MB 上限）与调试目录 `logdir/_smoke_train_ratio_bug/`。
-`run.log` 原本被 PowerShell 5.1 的 `Tee-Object` 写成 UTF-16LE，**已无损转成 UTF-8**（16534 → 8278 字节，
-往返校验一致）以便 diff / grep。
+**只有小体积文本证据入库。二进制一律不入库。**
+
+为什么要立这条规矩：步骤 0 首次回传时把整个 `logdir/smoke/`（9 个文件、8.5 MB）提了进来，
+但其中只有 `run.log`（8 KB）和 `metrics.jsonl`（5 KB）是真正的证据；
+剩下的 `tfevents`（2.8 MB）和 6 个 episode npz（6.7 MB）都是 byproduct ——
+可重新生成，且会让仓库体积随实验次数单调增长。
+
+当前规则（见 `.gitignore`）：
+
+```
+logdir/*
+!logdir/smoke/
+logdir/smoke/*
+!logdir/smoke/*.log
+!logdir/smoke/*.jsonl
+```
+
+即白名单是**显式的**：要新增一种入库的文本证据，必须在 `.gitignore` 里显式开口子。
+这个设计是故意的 —— 比「忽略二进制后缀」更难绕过。
+
+| 内容 | 入库？ |
+|---|---|
+| `run.log`（stdout） | ✅ |
+| `metrics.jsonl`（标量指标） | ✅ |
+| `events.out.tfevents.*` | ❌ 可重生 |
+| `train_eps/*.npz`、`eval_eps/*.npz` | ❌ 可重生，冒烟阶段无价值 |
+| `latest.pt` 等权重 | ❌ 219 MB，超 GitHub 单文件上限 |
+| 录像 / mp4 | ❌ |
+
+已知代价：步骤 0 的 8.5 MB 二进制仍留在 git 历史里（`a442bfb`）。
+仓库还年轻，未来需要时可以重写历史抹掉；目前不值得为此 force push。
+
+`run.log` 原本被 PowerShell 5.1 的 `Tee-Object` 写成 UTF-16LE，
+**已无损转成 UTF-8**（16534 → 8278 字节，往返校验一致）以便 diff / grep。
 
 ## 6. 相关文档
 
