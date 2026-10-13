@@ -31,6 +31,28 @@ sys.path.insert(0, str(REPO / "third_party" / "dreamerv3-torch"))
 from envs.seg import SequentialEstimateGame, Spec  # noqa: E402
 
 
+def setup_cjk_font() -> str | None:
+    """挑一个能出中文的字体。没有就退回去（图里中文会变方框，但不影响运行）。"""
+    candidates = [
+        "Noto Sans CJK JP",
+        "Noto Sans CJK SC",
+        "Noto Sans CJK TC",
+        "Source Han Sans SC",
+        "WenQuanYi Zen Hei",
+        "SimHei",
+        "Heiti SC",
+        "PingFang SC",
+        "Arial Unicode MS",
+    ]
+    available = {f.name for f in matplotlib.font_manager.fontManager.ttflist}
+    for name in candidates:
+        if name in available:
+            plt.rcParams["font.sans-serif"] = [name, "DejaVu Sans"]
+            plt.rcParams["axes.unicode_minus"] = False  # 否则负号也是方框
+            return name
+    return None
+
+
 def pick_seed(spec: Spec, want_isolated: bool = True, trials: int = 400) -> int:
     """挑一个'有看头'的种子：最好既有连通的、也有孤立的 agent。"""
     for s in range(trials):
@@ -49,6 +71,9 @@ def main() -> int:
     ap.add_argument("--out", default="figures/seg_preview.png")
     ap.add_argument("--seed", type=int, default=-1, help="-1 表示自动挑")
     args = ap.parse_args()
+
+    font = setup_cjk_font()
+    print(f"CJK font: {font or '（未找到，中文会显示为方框）'}")
 
     spec = Spec()
     seed = pick_seed(spec) if args.seed < 0 else args.seed
