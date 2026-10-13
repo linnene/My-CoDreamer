@@ -184,14 +184,16 @@ def simulate_marl(
         results = [envs[i].step(indices[i]) for i in range(n_teams)]
         obs = [r[0] for r in results]
         reward = [r[1] for r in results]          # 每队 (N,)
-        team_done = np.array([bool(r[2]) for r in results])
+        # 必须写回 done。上游 simulate 就是靠每轮重新赋值 done 来清掉上一轮的完成标记；
+        # 漏掉这一句会死循环：每轮都重置 env，episode 永不结束（`episodes` 模式直接挂死）。
+        done = np.array([bool(r[2]) for r in results])
         infos = [r[3] for r in results]
 
         step += n_teams
         # episode 统一按【agent episode】计数：一局结束 = N 条 agent episode
-        episode += int(team_done.sum()) * n_agents
+        episode += int(done.sum()) * n_agents
         length += 1
-        length *= 1 - team_done
+        length *= 1 - done
 
         # ---------------------------------------------------------- 写入 N 条流
         for i in range(n_teams):
@@ -207,8 +209,8 @@ def simulate_marl(
                 add_to_cache(cache, agent_episode_id(team_ids[i], k), transition)
 
         # ---------------------------------------------------------- 收尾
-        if team_done.any():
-            for i in np.flatnonzero(team_done):
+        if done.any():
+            for i in np.flatnonzero(done):
                 if is_eval:
                     # 评测时：N 个 agent 各算一条 episode
                     for k in range(n_agents):
