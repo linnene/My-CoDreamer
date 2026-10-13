@@ -100,7 +100,8 @@ def main() -> int:
         if "=" not in spec:
             print(f"格式错误（应为 标签=目录）: {spec}")
             return 2
-        label, path = spec.split("=", 1)
+        # 从【最后一个】= 处切 —— 标签里可能自带 = （例如 "pretrain=500"）
+        label, path = spec.rsplit("=", 1)
         logdir = pathlib.Path(path).expanduser()
         rows = load(logdir)
         runs.append({"label": label, "logdir": logdir, "rows": rows})
