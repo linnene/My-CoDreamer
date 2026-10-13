@@ -71,6 +71,20 @@ from envs.seg import SequentialEstimateGame, Spec
 __all__ = ["SequentialEstimateGameEnv"]
 
 
+# =============================================================================
+# 观测模式
+# =============================================================================
+#   "local"   只看自己： obs = [s_i] + one-hot(i)                维度 = 1 + N
+#   "oracle"  直接给全部：obs = [s_0..s_{N-1}] + one-hot(i)      维度 = N + N
+#
+# oracle 是用来算【上界】的：它能看到所有 agent 的状态，因此能精确算出目标
+# y_i = eta*s_i + (1-eta)*mean(neighbours)，必定选对区间、每步得 0 分。
+#
+# 用途：如果 oracle 与 local 的差距很小，说明这个环境根本没有给通信留空间，
+# 那么"加上 GNN 会不会更好"这个问题在此环境上就是不可测的。
+OBS_MODES = ("local", "oracle")
+
+
 class SequentialEstimateGameEnv:
     """队伍级环境。对外接口刻意贴近 gym，但不继承 gym.Env（多智能体不是 gym 语义）。"""
 
@@ -81,17 +95,25 @@ class SequentialEstimateGameEnv:
         spec: Spec | None = None,
         seed: int | None = None,
         add_agent_index: bool = True,
+        obs_mode: str = "local",
     ) -> None:
+        if obs_mode not in OBS_MODES:
+            raise ValueError(f"unknown obs_mode: {obs_mode} (expected one of {OBS_MODES})")
         self.spec = spec or Spec()
         self.game = SequentialEstimateGame(self.spec, seed=seed)
         self._add_agent_index = add_agent_index
+        self._obs_mode = obs_mode
         self._seed = seed
         self._rng = np.random.default_rng(seed)
 
         n = self.spec.num_agents
         d = self.spec.obs_size
-        # 单个 agent 的观测维度：D 维观测 (+ N 维 one-hot agent index)
-        agent_dim = d + (n if add_agent_index else 0)
+        # 单个 agent 的观测维度
+        if obs_mode == "oracle":
+            d_eff = n * d          # 全部 agent 的状态
+        else:
+            d_eff = d              # 只有自己的
+        agent_dim = d_eff + (n if add_agent_index else 0)
 
         self.observation_space = gym.spaces.Dict(
             {
@@ -124,13 +146,27 @@ class SequentialEstimateGameEnv:
     # ------------------------------------------------------------------ 组装观测
 
     def _make_obs(self, raw: np.ndarray, is_first: bool, is_terminal: bool) -> dict:
-        """把游戏返回的 (N, obs_size) 观测拼上 one-hot 索引，组装成框架要的 dict。"""
+        """把游戏返回的 (N, obs_size) 观测组装成框架要的 dict。
+
+        raw 是全部 N 个 agent 的状态。每个 agent 看到的东西取决于 obs_mode：
+          local  -> 只有自己那一行
+          oracle -> 整个 raw 拍平（所有 agent 的状态）
+        然后按需拼上自己的 one-hot 索引。
+        """
         n = self.spec.num_agents
-        parts = [raw]
+        if self._obs_mode == "oracle":
+            # (N, obs_size) -> (N, N*obs_size)，每行都是全部 agent 的状态
+            flat = raw.reshape(1, -1).repeat(n, axis=0)
+        else:
+            flat = raw
+        parts = [flat]
         if self._add_agent_index:
             parts.append(self._agent_onehot)
         state = np.concatenate(parts, axis=1).astype(np.float32)
-        assert state.shape == (n, self.observation_space["state"].shape[0]), state.shape
+        assert state.shape == (n, self.observation_space["state"].shape[0]), (
+            state.shape,
+            self.observation_space["state"].shape,
+        )
         return {
             "state": state,
             "is_first": np.full(n, is_first, dtype=bool),

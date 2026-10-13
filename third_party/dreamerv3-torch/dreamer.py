@@ -173,7 +173,19 @@ def make_env(config, mode, id):
         import envs.seg_gym as seg_gym
         from envs.seg import Spec
 
-        return seg_gym.SequentialEstimateGameEnv(Spec(), seed=config.seed + id)
+        # [CoDreamer] 环境规格由 config 驱动，便于做横向对比实验（见
+        # docs/reproduction-plan.md）。默认值就是论文 Table 1。
+        spec = Spec(
+            num_agents=config.seg_num_agents,
+            horizon=config.seg_horizon,
+            num_actions=config.seg_num_actions,
+            edge_density=config.seg_edge_density,
+            local_state_ratio=config.seg_local_state_ratio,
+            target_transform=config.seg_target_transform,
+        )
+        return seg_gym.SequentialEstimateGameEnv(
+            spec, seed=config.seed + id, obs_mode=config.seg_obs_mode
+        )
     if suite == "dmc":
         import envs.dmc as dmc
 
