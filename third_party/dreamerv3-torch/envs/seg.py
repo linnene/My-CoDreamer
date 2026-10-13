@@ -93,6 +93,22 @@ class Spec:
     adjacency_sampling: str = "upper_triangle"  # "upper_triangle" | "symmetric_full"
     global_mode: str = "none"               # "none" | "sum" | "min"
 
+    # 奖励目标 y 的构造。论文原式为 y = 2w - 0.5，其中
+    #   w = eta * s_i + (1-eta) * mean_{j in N_i}(s_j)  in [0, 1]
+    # 但同一页又说动作对应 [0,1] 上的等距区间 —— 两者不自洽（y 可到 -0.5 / 1.5，
+    # 此时无任何动作能得 0 分）。见模块 docstring「奖励目标」一节。
+    #
+    #   "identity"   y = w          in [0, 1]   ← 默认，与动作区间自洽
+    #   "stretch"    y = 2w - 0.5   in [-0.5, 1.5]  论文原文字面读法
+    target_transform: str = "identity"
+
+    # 空邻域（孤岛 agent）时邻居均值取什么。论文承认孤岛必然出现，并称之为
+    # "complete independence" —— 即 reward 与 transition 只依赖自身。
+    #
+    #   "self"  邻居均值 = 自身状态 → y = s_i（干净的"完全独立"）← 默认
+    #   "zero"  邻居均值 = 0       → 会把 y 拖到负值，进一步恶化目标越界问题
+    empty_neighbourhood: str = "self"
+
     def __post_init__(self) -> None:
         if self.num_agents < 1:
             raise ValueError("num_agents must be >= 1")
@@ -110,6 +126,12 @@ class Spec:
             raise ValueError(f"unknown adjacency_sampling: {self.adjacency_sampling}")
         if self.global_mode not in ("none", "sum", "min"):
             raise ValueError(f"unknown global_mode: {self.global_mode}")
+        if self.target_transform not in ("identity", "stretch"):
+            raise ValueError(f"unknown target_transform: {self.target_transform}")
+        if self.empty_neighbourhood not in ("self", "zero"):
+            raise ValueError(
+                f"unknown empty_neighbourhood: {self.empty_neighbourhood}"
+            )
 
 
 class SequentialEstimateGame:
@@ -207,19 +229,34 @@ class SequentialEstimateGame:
         )
 
     def _neighbour_mean(self, values: np.ndarray) -> np.ndarray:
-        """对每个 agent 求其邻居的均值；空邻域定义为 0.0（见模块 docstring #4）。"""
+        """对每个 agent 求其邻居的均值。
+
+        空邻域的取值由 `Spec.empty_neighbourhood` 决定（默认取自身，
+        即论文所说的 "complete independence"）。
+        """
         out = np.zeros(self.spec.num_agents, dtype=np.float64)
         for i, nbrs in enumerate(self.neighbors):
             if nbrs.size:
                 out[i] = float(values[nbrs].mean())
+            elif self.spec.empty_neighbourhood == "self":
+                out[i] = float(values[i])
+            # "zero" -> 保持 0.0
         return out
 
     def target(self, state: np.ndarray | None = None) -> np.ndarray:
-        """论文中的 y_i，(N,)。"""
+        """论文中的 y_i，(N,)。
+
+        注意：论文原式 y = 2w - 0.5 的范围是 [-0.5, 1.5]，而动作区间只盖 [0,1]，
+        两者不自洽。默认采用其未拉伸的等价形式 y = w ∈ [0, 1]。
+        详见模块 docstring「奖励目标」。
+        """
         s = self.state if state is None else state
         eta = self.spec.local_state_ratio
         nbr_mean = self._neighbour_mean(s)
-        return 2.0 * (eta * (s - 0.5) + (1.0 - eta) * (nbr_mean - 0.5)) + 0.5
+        w = eta * s + (1.0 - eta) * nbr_mean  # 凸组合，必在 [0, 1]
+        if self.spec.target_transform == "identity":
+            return w
+        return 2.0 * w - 0.5
 
     def bin_center(self, actions: np.ndarray) -> np.ndarray:
         """动作下标 -> 区间中心，(N,) 且落在 (0, 1)。"""
@@ -358,23 +395,47 @@ def _self_test() -> None:
             break
     check("isolated agent occurs", isolated_seen)
 
-    # --- 奖励：正确区间给 0，否则为负；上界恒 <= 0
-    # 区间 a 的中心是 (a+0.5)/|A|，它覆盖 [a/|A|, (a+1)/|A|)。
-    # 所以"包含 y"的动作下标是 floor(y*|A|)，而**不是** floor(y*|A|-0.5)
-    # —— 后者是"中心最接近 y"，两者只有在 y 恰好处在区间正中时才重合。
+    # --- 奖励目标 y 的取值范围（论文公式与动作区间是否自洽的关键）
     n_actions = spec.num_actions
     half_bin = 1.0 / (2.0 * n_actions)
+
+    ys = []
+    for s in range(300):
+        game.reset(seed=5000 + s)
+        ys.append(game.target())
+    ys = np.concatenate(ys)
+    check(
+        "identity: y 恒在 [0,1]",
+        bool((ys >= 0).all() and (ys <= 1).all()),
+        f"min={ys.min():.4f} max={ys.max():.4f}",
+    )
+
+    gm = SequentialEstimateGame(replace(spec, target_transform="stretch"), seed=0)
+    ys2 = []
+    for s in range(300):
+        gm.reset(seed=5000 + s)
+        ys2.append(gm.target())
+    ys2 = np.concatenate(ys2)
+    check(
+        "stretch: y 会越出 [0,1]（论文原文字面读法）",
+        bool((ys2 < 0).any() or (ys2 > 1).any()),
+        f"min={ys2.min():.4f} max={ys2.max():.4f}",
+    )
+
+    # --- 奖励：区间 a 的中心是 (a+0.5)/|A|，覆盖 [a/|A|, (a+1)/|A|)
+    # "包含 y" 的动作下标是 floor(y*|A|)，而非 floor(y*|A|-0.5)（后者是"中心最接近"）
     game.reset(seed=7)
     y = game.target()
     exact = np.clip(np.floor(y * n_actions + 1e-9).astype(int), 0, n_actions - 1)
     _, r_best, _, _ = game.step(exact)
     check("best action gives 0", bool(np.allclose(r_best, 0.0, atol=1e-6)), str(r_best))
 
-    # 穷举验证：奖励为 0 当且仅当 |区间中心 - y| <= 半个区间宽
-    game.reset(seed=7)
-    y = game.target()
+    # 穷举验证：奖励为 0 <=> |区间中心 - y| <= 半个区间宽
+    # 注意：每个动作都要重新 reset —— step 会改变状态，不 reset 则 y 不再是同一个
     exhaustive_ok = True
     for a in range(n_actions):
+        game.reset(seed=7)
+        y = game.target()
         _, r_a, _, _ = game.step(np.full(spec.num_agents, a, dtype=int))
         centre = (a + 0.5) / n_actions
         expected_zero = np.abs(centre - y) <= half_bin + 1e-12
