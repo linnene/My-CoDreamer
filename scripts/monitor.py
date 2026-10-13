@@ -157,9 +157,11 @@ def render(d: dict, args) -> str:
         out.append(f"  {DIM}{log['path']}{RESET}   "
                    f"最后写入 {acolor}{age:.0f}s 前{RESET}")
         latest = None
-        for ln in log.get("lines", []):
+        # 从尾部往回找 —— 日志里最后几行往往是 FutureWarning，直接从前往后找会取到旧的
+        for ln in reversed(log.get("lines", [])):
             if "update_count" in ln or "eval_return" in ln or "train_return" in ln:
                 latest = ln
+                break
         if latest:
             out.append(f"  {BOLD}{latest.strip()[:w - 4]}{RESET}")
         else:
@@ -173,7 +175,7 @@ def render(d: dict, args) -> str:
 
 def collect(args) -> dict:
     cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", args.host,
-           f"python3 {args.remote_script} --top {args.top} --log-lines 8"]
+           f"python3 {args.remote_script} --top {args.top} --log-lines 60"]
     if args.log:
         cmd[-1] += f" --log {args.log}"
     try:
