@@ -249,11 +249,15 @@ def _self_test() -> None:
           env2.observation_space["state"].shape == (d,),
           str(env2.observation_space["state"].shape))
 
-    # --- 同一局内 N 个 agent 的观测应来自同一个状态
+    # --- 一局内 N 个 agent 各有自己的局部状态（不应该相等），但共享同一张邻接矩阵
     env3 = SequentialEstimateGameEnv(Spec(), seed=0)
     o3 = env3.reset()
-    check("N 个 agent 共享同一局",
-          bool(np.allclose(o3["state"][:, :d], o3["state"][0, :d])))
+    locals3 = o3["state"][:, :d]
+    check("N 个 agent 的局部状态各不相同",
+          len({tuple(v) for v in locals3}) == n, str(locals3.ravel()))
+    adj = env3.adjacency
+    check("整个队伍共享一张邻接矩阵", adj.shape == (n, n), str(adj.shape))
+    check("邻接矩阵无自环", bool(not np.diag(adj).any()))
 
     print("-" * 68)
     if failures:

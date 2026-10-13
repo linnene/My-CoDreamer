@@ -359,13 +359,30 @@ def _self_test() -> None:
     check("isolated agent occurs", isolated_seen)
 
     # --- 奖励：正确区间给 0，否则为负；上界恒 <= 0
+    # 区间 a 的中心是 (a+0.5)/|A|，它覆盖 [a/|A|, (a+1)/|A|)。
+    # 所以"包含 y"的动作下标是 floor(y*|A|)，而**不是** floor(y*|A|-0.5)
+    # —— 后者是"中心最接近 y"，两者只有在 y 恰好处在区间正中时才重合。
+    n_actions = spec.num_actions
+    half_bin = 1.0 / (2.0 * n_actions)
     game.reset(seed=7)
     y = game.target()
-    exact = np.clip(
-        np.floor(y * spec.num_actions - 0.5 + 1e-9).astype(int), 0, spec.num_actions - 1
-    )
+    exact = np.clip(np.floor(y * n_actions + 1e-9).astype(int), 0, n_actions - 1)
     _, r_best, _, _ = game.step(exact)
     check("best action gives 0", bool(np.allclose(r_best, 0.0, atol=1e-6)), str(r_best))
+
+    # 穷举验证：奖励为 0 当且仅当 |区间中心 - y| <= 半个区间宽
+    game.reset(seed=7)
+    y = game.target()
+    exhaustive_ok = True
+    for a in range(n_actions):
+        _, r_a, _, _ = game.step(np.full(spec.num_agents, a, dtype=int))
+        centre = (a + 0.5) / n_actions
+        expected_zero = np.abs(centre - y) <= half_bin + 1e-12
+        actual_zero = r_a > -1e-12
+        if not np.array_equal(expected_zero, actual_zero):
+            exhaustive_ok = False
+            break
+    check("奖励为 0 的区间恰好是覆盖 y 的区间", exhaustive_ok)
 
     game.reset(seed=7)
     y = game.target()
