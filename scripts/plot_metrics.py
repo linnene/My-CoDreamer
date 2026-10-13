@@ -108,13 +108,15 @@ def main() -> int:
         ax.plot(x, y, ls="none", marker=".", ms=3, alpha=0.45,
                 color="tab:blue", label="每局回报")
         # 滑动平均按分段分别算，不跨断层
+        labelled = False
         for seg_x, seg_y in split_segments(x, y):
             ys = smooth(seg_y, args.smooth)
-            if len(ys) == len(seg_y):
-                ax.plot(seg_x, ys, lw=1.2, color="tab:blue")
-            elif len(ys):
-                ax.plot(seg_x[len(seg_y) - len(ys):], ys, lw=2.0, color="tab:blue",
-                        label=f"滑动平均 (w={args.smooth})")
+            if not len(ys):
+                continue
+            xs = seg_x[len(seg_y) - len(ys):]
+            ax.plot(xs, ys, lw=2.0, color="tab:blue",
+                    label=(None if labelled else f"滑动平均 (w={args.smooth})"))
+            labelled = True
         ax.axhline(0, color="black", lw=0.8, ls="--")
         ax.text(0.02, 0.96, "0 = 满分（猜中目标）", transform=ax.transAxes,
                 fontsize=9, va="top")
@@ -126,7 +128,7 @@ def main() -> int:
                         fontsize=8, color="dimgray",
                         arrowprops=dict(arrowstyle="->", color="dimgray", lw=0.8))
     ax.set_title("① 训练回报 train_return（每完成一局记一个点）")
-    ax.set_xlabel("agent 步")
+    ax.set_xlabel("logger.step")
     ax.set_ylabel("回报")
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8, loc="lower right")
@@ -143,7 +145,7 @@ def main() -> int:
     else:
         ax.text(0.5, 0.5, "没有 eval_return", ha="center", transform=ax.transAxes)
     ax.set_title("② 评测回报 eval_return（策略用 mode，非采样）")
-    ax.set_xlabel("agent 步")
+    ax.set_xlabel("logger.step")
     ax.set_ylabel("回报")
     ax.grid(alpha=0.3)
 
@@ -155,7 +157,7 @@ def main() -> int:
         if len(x):
             ax.plot(x, y, lw=1.3, color=color, label=key)
     ax.set_title("③ 世界模型损失")
-    ax.set_xlabel("agent 步")
+    ax.set_xlabel("logger.step")
     ax.set_ylabel("loss")
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8)
@@ -171,7 +173,7 @@ def main() -> int:
         ax2.plot(x2, y2, lw=1.2, color="tab:gray", label="update_count")
         ax2.set_ylabel("梯度更新次数", color="tab:gray")
     ax.set_title("④ 训练进度")
-    ax.set_xlabel("agent 步")
+    ax.set_xlabel("logger.step")
     ax.set_ylabel("数据集规模")
     ax.grid(alpha=0.3)
     ax.legend(fontsize=8, loc="upper left")
