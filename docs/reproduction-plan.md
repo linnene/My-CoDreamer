@@ -182,6 +182,7 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `dreamer.py` | `main()`：读 `env.num_agents`；多智能体时跳过 `Damy`/`Parallel`；预填随机策略的 batch 改为 `envs*num_agents`；三处收集调用改为 `collect`（= `tools_marl.simulate_marl`）；**train_ratio 自动补偿** | 步骤 1 | `# [CoDreamer]` |
 | `configs.yaml` | 新增 `codreamer` 配置块（`seg` 任务、队伍数、超参） | 步骤 1 | `# [CoDreamer]` |
 | `models.py` | `preprocess` 里 `obs["image"] /= 255` 改为条件执行（向量观测环境没有 image key） | 步骤 1 | `# [CoDreamer]` |
+| `dreamer.py` | `_train` 增加 `update_behavior` 分支：预训练阶段**只更新世界模型**，跳过 actor-critic 与探索策略。上游无条件两者都训，与论文 D.3 的 "before any behaviour is learnt" 不符 | 步骤 1 | `# [CoDreamer]` |
 
 新增文件（不在上游清单里，因此不影响"清单不一致 ⟺ 真改了"这个不变式）：
 

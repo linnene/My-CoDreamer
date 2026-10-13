@@ -62,13 +62,15 @@ class Dreamer(nn.Module):
     def __call__(self, obs, reset, state=None, training=True):
         step = self._step
         if training:
+            pretraining = bool(self._should_pretrain())
             steps = (
                 self._config.pretrain
-                if self._should_pretrain()
+                if pretraining
                 else self._should_train(step)
             )
             for _ in range(steps):
-                self._train(next(self._dataset))
+                # [CoDreamer] 预训练阶段只更新世界模型（见 _train 的说明）
+                self._train(next(self._dataset), update_behavior=not pretraining)
                 self._update_count += 1
                 self._metrics["update_count"] = self._update_count
             if self._should_log(step):
@@ -118,18 +120,33 @@ class Dreamer(nn.Module):
         state = (latent, action)
         return policy_output, state
 
-    def _train(self, data):
+    def _train(self, data, update_behavior=True):
         metrics = {}
         post, context, mets = self._wm._train(data)
         metrics.update(mets)
-        start = post
-        reward = lambda f, s, a: self._wm.heads["reward"](
-            self._wm.dynamics.get_feat(s)
-        ).mode()
-        metrics.update(self._task_behavior._train(start, reward)[-1])
-        if self._config.expl_behavior != "greedy":
-            mets = self._expl_behavior.train(start, context, data)[-1]
-            metrics.update({"expl_" + key: value for key, value in mets.items()})
+        # [CoDreamer] 预训练阶段跳过 actor-critic 与探索策略。
+        #
+        # 论文（附录 D.3）：
+        #   "we perform 500 training steps of the world model **before any
+        #    behaviour is learnt**. This form of pre-training is performed in
+        #    order to avoid negative performance effects due to a primacy bias"
+        #
+        # 上游这里无条件训 actor-critic，于是 config.pretrain 只相当于
+        # "开局先连做 N 次训练"，而不是论文说的"策略晚 N 步再开始学"。
+        # 两者的区别在于：预训练期间世界模型还不准，它想象的轨迹是假的，
+        # 策略在这堆假数据上训就会被带偏（primacy bias）。
+        #
+        # update_behavior=False 时只有世界模型在更新 → 与论文一致。
+        # 登记于 docs/reproduction-plan.md「改动清单」。
+        if update_behavior:
+            start = post
+            reward = lambda f, s, a: self._wm.heads["reward"](
+                self._wm.dynamics.get_feat(s)
+            ).mode()
+            metrics.update(self._task_behavior._train(start, reward)[-1])
+            if self._config.expl_behavior != "greedy":
+                mets = self._expl_behavior.train(start, context, data)[-1]
+                metrics.update({"expl_" + key: value for key, value in mets.items()})
         for name, value in metrics.items():
             if not name in self._metrics.keys():
                 self._metrics[name] = [value]

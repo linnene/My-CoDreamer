@@ -193,6 +193,10 @@ codreamer:
   action_repeat: 1
   steps: 1e5
   prefill: 1000
+  # 论文 D.3："500 training steps of the world model before any behaviour
+  # is learnt"。上游默认 100，且语义不同（那个 100 里策略也在训）。
+  # 我们已经给 _train 加了 update_behavior 分支，这里的 500 才是论文说的那个。
+  pretrain: 500
   train_ratio: 512
   eval_every: 5e3
   eval_episode_num: 8
