@@ -207,6 +207,17 @@ codreamer:
   encoder: {mlp_keys: '.*', cnn_keys: '$^'}
   decoder: {mlp_keys: '.*', cnn_keys: '$^'}
 
+  # --- Sequential Estimate Game 的环境规格（默认值 = 论文 Table 1）-------------
+  # 这几个键的意义是做横向对比实验：找出"通信真正有用"的配置区间。
+  # 所有键都会自动变成命令行参数，例如 --seg_obs_mode oracle。
+  seg_num_agents: 4           # n
+  seg_horizon: 5              # T
+  seg_num_actions: 4          # |A|，间接决定容差 1/(2|A|)
+  seg_edge_density: 0.6       # rho
+  seg_local_state_ratio: 0.3  # eta，越小越依赖邻居
+  seg_target_transform: 'identity'   # identity | stretch（论文原式）
+  seg_obs_mode: 'local'       # local | oracle（给全部 agent 状态，用于算上界）
+
 debug:
   debug: True
   pretrain: 1
