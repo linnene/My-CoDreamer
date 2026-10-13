@@ -70,6 +70,15 @@ def agent_episode_id(team_id: str, agent_index: int) -> str:
     return f"{team_id}-a{agent_index}"
 
 
+def _env_id(env, index: int) -> str:
+    """取队伍 id。
+
+    上游靠 `wrappers.UUID` 给每个 env 挂 `.id`（用于区分并行环境）。我们的队伍级
+    环境不一定被包过，所以缺省用下标兑一个稳定 id。
+    """
+    return getattr(env, "id", f"team{index}")
+
+
 def _split_action(action, n_teams: int, n_agents: int):
     """把 agent 返回的动作拆成 (n_teams, n_agents, ·) 的 numpy 数组。
 
@@ -114,6 +123,7 @@ def simulate_marl(
         if e.num_agents != n_agents:
             raise ValueError("all envs must have the same number of agents")
     batch = n_teams * n_agents
+    team_ids = [_env_id(e, i) for i, e in enumerate(envs)]
 
     if state is None:
         step, episode = 0, 0
@@ -140,7 +150,7 @@ def simulate_marl(
                     t = {key: convert(val[k]) for key, val in result.items()}
                     t["reward"] = 0.0
                     t["discount"] = 1.0
-                    add_to_cache(cache, agent_episode_id(envs[i].id, k), t)
+                    add_to_cache(cache, agent_episode_id(team_ids[i], k), t)
                 obs[i] = result
 
         # ---------------------------------------------------------- 铺平成 batch
@@ -194,7 +204,7 @@ def simulate_marl(
                 transition["discount"] = info.get(
                     "discount", np.array(1 - float(d), dtype=np.float32)
                 )
-                add_to_cache(cache, agent_episode_id(envs[i].id, k), transition)
+                add_to_cache(cache, agent_episode_id(team_ids[i], k), transition)
 
         # ---------------------------------------------------------- 收尾
         if team_done.any():
@@ -202,12 +212,12 @@ def simulate_marl(
                 if is_eval:
                     # 评测时：N 个 agent 各算一条 episode
                     for k in range(n_agents):
-                        ep = cache[agent_episode_id(envs[i].id, k)]
+                        ep = cache[agent_episode_id(team_ids[i], k)]
                         eval_lengths.append(len(ep["reward"]) - 1)
                         eval_scores.append(float(np.array(ep["reward"]).sum()))
                 else:
                     for k in range(n_agents):
-                        key = agent_episode_id(envs[i].id, k)
+                        key = agent_episode_id(team_ids[i], k)
                         save_episodes(directory, {key: cache[key]})
                         ep_len = len(cache[key]["reward"]) - 1
                         score = float(np.array(cache[key]["reward"]).sum())
