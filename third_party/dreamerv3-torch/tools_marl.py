@@ -138,6 +138,7 @@ def simulate_marl(
     eval_scores: list[float] = []
     eval_lengths: list[int] = []
     eval_done = False
+    episodes_seen = 0  # 已完成的 agent episode 总数（供日志用）
 
     while (steps and step < steps) or (episodes and episode < episodes):
         # ---------------------------------------------------------- 重开完成的队伍
@@ -227,11 +228,20 @@ def simulate_marl(
                             if "log_" in lk:
                                 logger.scalar(lk, float(np.array(cache[key][lk]).sum()))
                                 cache[key].pop(lk)
+                        # [CoDreamer] 存盘后把这个 agent 的流清掉，让它下局从头开始。
+                        #
+                        # 上游不清（它假设 episode 很长，且靠 erase_over_episodes 在
+                        # dataset_size 处整体淘汰）。但我们的 episode 只有 T=5 步：
+                        # 不清的话同一个 key 会一直累积，而 save_episodes 每次写出的是
+                        # **整个增长中的数组**，总写入量是 O(n^2)，真跑起来会把磁盘压死。
+                        # 清掉之后，每个 agent-episode 就是一个独立的 npz。
+                        del cache[key]
+                        episodes_seen += 1
                     step_in_dataset = erase_over_episodes(cache, limit)
                     logger.scalar("dataset_size", step_in_dataset)
                     logger.scalar("train_return", score)
                     logger.scalar("train_length", ep_len)
-                    logger.scalar("train_episodes", len(cache))
+                    logger.scalar("train_episodes", episodes_seen)
                     logger.write(step=logger.step)
 
         if (
@@ -248,8 +258,9 @@ def simulate_marl(
 
     if is_eval:
         # 评测时只留最后一条，供 video_pred 使用
+        # （不能用 popitem(last=False)：那是 OrderedDict 的接口，cache 是普通 dict）
         while len(cache) > 1:
-            cache.popitem(last=False)
+            cache.pop(next(iter(cache)))
 
     return (
         step - steps,
@@ -309,6 +320,7 @@ class _FakeLogger:
 
 
 def _self_test() -> None:
+    import pathlib
     import tempfile
 
     from envs.seg import Spec
@@ -345,28 +357,25 @@ def _self_test() -> None:
               str(policy.calls[:3]))
         check("done 长度 = batch", all(d == n for _, d in policy.calls))
 
-        # N 条独立 episode 流
-        ids = sorted(cache.keys())
-        check("产生了 N 条 episode 流", len(ids) == n, str(ids))
-        check("id 命名带 agent 后缀",
-              all(i.endswith(f"-a{k}") for k, i in enumerate(ids)))
+        # 完成时存盘并从 cache 清掉 —— 检查磁盘上的 npz
+        files = sorted(pathlib.Path(tmp).glob("*.npz"))
+        check("每个 agent-episode 一个 npz", len(files) == 2 * n, f"{len(files)} 个")
+        check("cache 在 episode 完成后被清空", len(cache) == 0, str(list(cache)))
+        check("train_episodes 最终 = 2*N",
+              logger.scalars["train_episodes"][-1] == 2 * n,
+              str(logger.scalars["train_episodes"]))
 
-        # 每条流的长度与内容
-        for k, key in enumerate(ids):
-            ep = cache[key]
-            check(f"流 {k} 有 {spec.horizon + 1} 步（含初始）",
-                  len(ep["reward"]) == spec.horizon + 1, str(len(ep["reward"])))
-            check(f"流 {k} 首步 reward = 0（初始记录）", float(ep["reward"][0]) == 0.0)
-            check(f"流 {k} state 是单智能体形状",
-                  np.array(ep["state"]).shape[1:] == (spec.obs_size + n,),
-                  str(np.array(ep["state"]).shape))
-            check(f"流 {k} action 是 one-hot 且宽度 = |A|",
-                  np.array(ep["action"]).shape[1:] == (spec.num_actions,),
-                  str(np.array(ep["action"]).shape))
-            check(f"流 {k} 后续 reward ≤ 0",
-                  bool((np.array(ep["reward"])[1:] <= 1e-9).all()))
+        npz = np.load(files[0])
+        check("npz 步数 = horizon+1（含初始）",
+              npz["reward"].shape[0] == spec.horizon + 1, str(npz["reward"].shape))
+        check("npz state 是单智能体形状",
+              npz["state"].shape[1:] == (spec.obs_size + n,), str(npz["state"].shape))
+        check("npz action 宽度 = |A|",
+              npz["action"].shape[1:] == (spec.num_actions,), str(npz["action"].shape))
+        check("npz 首步 reward = 0（初始记录）", float(npz["reward"][0]) == 0.0)
+        check("npz 后续 reward ≤ 0", bool((npz["reward"][1:] <= 1e-9).all()))
 
-        check("episode 计数", episode == 1, str(episode))
+        check("episode 计数", episode == 2 * n, str(episode))
         check("logger 记录了 train_return", "train_return" in logger.scalars)
 
     # --- 多队伍：batch 应为 n_teams * N
@@ -378,10 +387,12 @@ def _self_test() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         simulate_marl(policy2, envs2, cache2, tmp, logger2, limit=10**6,
                       steps=2 * spec.horizon)
+        n_files2 = len(list(pathlib.Path(tmp).glob("*.npz")))
     check("多队伍时 batch = n_teams*N",
           all(b == n_teams * n for b, _ in policy2.calls), str(policy2.calls[:2]))
-    check("多队伍产生 n_teams*N 条流",
-          len(cache2) == n_teams * n, str(len(cache2)))
+    check("多队伍 npz 数 = n_teams*N*2 局",
+          n_files2 == n_teams * n * 2, f"{n_files2} 个")
+    check("多队伍 cache 被清空", len(cache2) == 0, f"残留 {len(cache2)}")
 
     # --- 评测模式的 episodes 计数
     envs3 = [SequentialEstimateGameEnv(spec, seed=7)]
