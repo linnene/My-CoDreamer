@@ -55,11 +55,27 @@ agent 调用约定：把 N 个 agent 铺平成 batch
 
 from __future__ import annotations
 
+import datetime
+import uuid
+
 import numpy as np
 
 from tools import add_to_cache, convert, erase_over_episodes, save_episodes
 
 __all__ = ["agent_episode_id", "simulate_marl"]
+
+
+def _fresh_id() -> str:
+    """每局重新生成的唯一 id。
+
+    跟着上游 `wrappers.UUID.reset()` 的做法——它在每次 reset 时换一个新 id，
+    于是每局天然写到一个**新的 cache key**，不会跳局累积。
+
+    这一点很重要：save_episodes 的存盘名是 `{id}-{长度}.npz`，而我们的 episode
+    长度固定（T=5）。如果不换 id，第二局会直接**覆盖**第一局的文件。
+    """
+    stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    return f"{stamp}-{uuid.uuid4().hex}"
 
 
 def agent_episode_id(team_id: str, agent_index: int) -> str:
@@ -138,12 +154,15 @@ def simulate_marl(
     eval_scores: list[float] = []
     eval_lengths: list[int] = []
     eval_done = False
-    episodes_seen = 0  # 已完成的 agent episode 总数（供日志用）
 
     while (steps and step < steps) or (episodes and episode < episodes):
         # ---------------------------------------------------------- 重开完成的队伍
         if done.any():
             for i in np.flatnonzero(done):
+                # 换新 id —— 每局一个独立的 episode 流（见 _fresh_id 的注释）
+                team_ids[i] = _fresh_id()
+                if hasattr(envs[i], "id"):
+                    envs[i].id = team_ids[i]
                 result = envs[i].reset()
                 length[i] = 0
                 # 每个 agent 各写一条初始记录，形成 N 条独立 episode 流
@@ -228,20 +247,15 @@ def simulate_marl(
                             if "log_" in lk:
                                 logger.scalar(lk, float(np.array(cache[key][lk]).sum()))
                                 cache[key].pop(lk)
-                        # [CoDreamer] 存盘后把这个 agent 的流清掉，让它下局从头开始。
-                        #
-                        # 上游不清（它假设 episode 很长，且靠 erase_over_episodes 在
-                        # dataset_size 处整体淘汰）。但我们的 episode 只有 T=5 步：
-                        # 不清的话同一个 key 会一直累积，而 save_episodes 每次写出的是
-                        # **整个增长中的数组**，总写入量是 O(n^2)，真跑起来会把磁盘压死。
-                        # 清掉之后，每个 agent-episode 就是一个独立的 npz。
-                        del cache[key]
-                        episodes_seen += 1
+                        # 保留 cache 条目（与上游一致）。每局已经是一个独立 key，
+                        # 所以 save_episodes 只写出这一局；内存由 erase_over_episodes
+                        # 根据 dataset_size 控制在下面处理。
+                        pass
                     step_in_dataset = erase_over_episodes(cache, limit)
                     logger.scalar("dataset_size", step_in_dataset)
                     logger.scalar("train_return", score)
                     logger.scalar("train_length", ep_len)
-                    logger.scalar("train_episodes", episodes_seen)
+                    logger.scalar("train_episodes", len(cache))
                     logger.write(step=logger.step)
 
         if (
@@ -357,10 +371,10 @@ def _self_test() -> None:
               str(policy.calls[:3]))
         check("done 长度 = batch", all(d == n for _, d in policy.calls))
 
-        # 完成时存盘并从 cache 清掉 —— 检查磁盘上的 npz
+        # 每局换新 id，所以一局一个 npz（旧行为：固定 key 会被下一局覆盖）
         files = sorted(pathlib.Path(tmp).glob("*.npz"))
         check("每个 agent-episode 一个 npz", len(files) == 2 * n, f"{len(files)} 个")
-        check("cache 在 episode 完成后被清空", len(cache) == 0, str(list(cache)))
+        check("cache 保留已完成的 episode", len(cache) == 2 * n, f"{len(cache)} 条")
         check("train_episodes 最终 = 2*N",
               logger.scalars["train_episodes"][-1] == 2 * n,
               str(logger.scalars["train_episodes"]))
@@ -385,14 +399,16 @@ def _self_test() -> None:
     logger2 = _FakeLogger()
     policy2 = _FakePolicy(spec.num_actions, seed=1)
     with tempfile.TemporaryDirectory() as tmp:
+        # 用 episodes= 而不是 steps= —— step 每次加的是 n_teams，用 steps 容易算错
         simulate_marl(policy2, envs2, cache2, tmp, logger2, limit=10**6,
-                      steps=2 * spec.horizon)
+                      episodes=2 * n_teams * n)
         n_files2 = len(list(pathlib.Path(tmp).glob("*.npz")))
     check("多队伍时 batch = n_teams*N",
           all(b == n_teams * n for b, _ in policy2.calls), str(policy2.calls[:2]))
     check("多队伍 npz 数 = n_teams*N*2 局",
-          n_files2 == n_teams * n * 2, f"{n_files2} 个")
-    check("多队伍 cache 被清空", len(cache2) == 0, f"残留 {len(cache2)}")
+          n_files2 == 2 * n_teams * n, f"{n_files2} 个")
+    check("多队伍 cache 保留 2 局 × n_teams*N",
+          len(cache2) == 2 * n_teams * n, f"{len(cache2)} 条")
 
     # --- 评测模式的 episodes 计数
     envs3 = [SequentialEstimateGameEnv(spec, seed=7)]
