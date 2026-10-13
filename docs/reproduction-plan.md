@@ -178,6 +178,17 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | 文件 | 改动 | 阶段 | 标注 |
 |---|---|---|---|
 | `dreamer.py` | 第 7 行 `os.environ["MUJOCO_GL"] = "osmesa"` → `setdefault(...)`，允许外部覆盖 | 步骤 0 | `# [CoDreamer]` |
+| `dreamer.py` | `make_env` 增加 `seg` 分支（队伍级环境，直接返回不接 gym wrapper 链） | 步骤 1 | `# [CoDreamer]` |
+| `dreamer.py` | `main()`：读 `env.num_agents`；多智能体时跳过 `Damy`/`Parallel`；预填随机策略的 batch 改为 `envs*num_agents`；三处收集调用改为 `collect`（= `tools_marl.simulate_marl`）；**train_ratio 自动补偿** | 步骤 1 | `# [CoDreamer]` |
+| `configs.yaml` | 新增 `codreamer` 配置块（`seg` 任务、队伍数、超参） | 步骤 1 | `# [CoDreamer]` |
+
+新增文件（不在上游清单里，因此不影响"清单不一致 ⟺ 真改了"这个不变式）：
+
+| 文件 | 作用 |
+|---|---|
+| `envs/seg.py` | Sequential Estimate Game 本体（纯 numpy） |
+| `envs/seg_gym.py` | 队伍级 gym 包装 |
+| `tools_marl.py` | 多智能体收集循环（N 条独立 episode 流） |
 
 ### 步骤 0 远端实测记录（2026-10-12, Windows + RTX 4060 Laptop 8GB）
 

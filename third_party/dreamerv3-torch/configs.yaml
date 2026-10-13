@@ -176,6 +176,31 @@ memorymaze:
   imag_gradient: 'reinforce'
   task: 'memorymaze_9x9'
 
+# [CoDreamer] 多智能体配置：Sequential Estimate Game（论文附录 B）
+#
+# 与 dmc_proprio 的差别：
+#   - task 前缀 'seg' 让 dreamer.py:make_env 走我们的队伍级环境分支
+#   - envs 是【**队伍数**】，不是 agent 数；每队内部有 Spec.num_agents 个 agent
+#   - action_repeat=1（本环境无帧堆叠概念），episode 长度由环境自己管（Spec.horizon）
+#
+# 关于 train_ratio：配置里保持论文值 512。多智能体下 _step 每队伍步增加
+# num_agents，会使调度频繁 num_agents*action_repeat 倍，因此 dreamer.py 会在
+# 启动时自动补偿（此处 512 -> 512/(4*1) = 128）并在日志里打印。
+# 详见 tools_marl.py 模块 docstring 的推导。
+codreamer:
+  task: 'seg_seq'
+  envs: 1
+  action_repeat: 1
+  steps: 1e5
+  prefill: 1000
+  train_ratio: 512
+  eval_every: 5e3
+  eval_episode_num: 8
+  log_every: 2e3
+  video_pred_log: false
+  encoder: {mlp_keys: '.*', cnn_keys: '$^'}
+  decoder: {mlp_keys: '.*', cnn_keys: '$^'}
+
 debug:
   debug: True
   pretrain: 1

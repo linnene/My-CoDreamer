@@ -17,6 +17,7 @@ sys.path.append(str(pathlib.Path(__file__).parent))
 import exploration as expl
 import models
 import tools
+import tools_marl
 import envs.wrappers as wrappers
 from parallel import Parallel, Damy
 
@@ -148,6 +149,14 @@ def make_dataset(episodes, config):
 
 def make_env(config, mode, id):
     suite, task = config.task.split("_", 1)
+    # [CoDreamer] 多智能体环境：队伍级，自己处理 id / 时间限制 / 动作选择，
+    # 因此直接返回，不接下面那条 gym wrapper 链（TimeLimit / SelectAction / UUID
+    # 都需要 env 是 gym.Env）。收集由 tools_marl.simulate_marl 负责。
+    if suite == "seg":
+        import envs.seg_gym as seg_gym
+        from envs.seg import Spec
+
+        return seg_gym.SequentialEstimateGameEnv(Spec(), seed=config.seed + id)
     if suite == "dmc":
         import envs.dmc as dmc
 
@@ -240,12 +249,36 @@ def main(config):
     make = lambda mode, id: make_env(config, mode, id)
     train_envs = [make("train", i) for i in range(config.envs)]
     eval_envs = [make("eval", i) for i in range(config.envs)]
-    if config.parallel:
-        train_envs = [Parallel(env, "process") for env in train_envs]
-        eval_envs = [Parallel(env, "process") for env in eval_envs]
+    # [CoDreamer] 多智能体：队伍级环境自带 num_agents。
+    # 单个 agent 的环境没有这个属性，回退到 1。
+    config.num_agents = getattr(train_envs[0], "num_agents", 1)
+    multi_agent = config.num_agents > 1
+    if multi_agent:
+        # 队伍级环境不能套 Damy/Parallel：
+        #   - Damy 的 step/reset 返回 lambda（延迟调用），而 simulate_marl 直接要元组
+        #   - 一个队伍内部已经含 N 个 agent，再并行会破坏同步推进
+        print(f"Multi-agent: num_agents={config.num_agents}, teams={config.envs}")
+        # [CoDreamer] 训练强度补偿。
+        #
+        # Dreamer.__call__ 结尾是 `self._step += len(reset)`，而多智能体下 reset 长度
+        # 是 队伍数×agent数，所以 _step 每队伍步增加 num_agents（单智能体时只增加
+        # 1/action_repeat）。于是 `_should_train` 会比预期频繁 num_agents*action_repeat 倍。
+        #
+        # 这里把 interval 放大同样倍数（即把 train_ratio 缩小），使"每个队伍步做多少次
+        # 梯度更新"与单智能体设定一致。推导见 tools_marl.py 模块 docstring。
+        factor = config.num_agents * config.action_repeat
+        before = config.train_ratio
+        config.train_ratio = max(1, int(round(config.train_ratio / factor)))
+        print(f"train_ratio {before} -> {config.train_ratio} (compensating x{factor})")
+        collect = tools_marl.simulate_marl
     else:
-        train_envs = [Damy(env) for env in train_envs]
-        eval_envs = [Damy(env) for env in eval_envs]
+        collect = tools.simulate
+        if config.parallel:
+            train_envs = [Parallel(env, "process") for env in train_envs]
+            eval_envs = [Parallel(env, "process") for env in eval_envs]
+        else:
+            train_envs = [Damy(env) for env in train_envs]
+            eval_envs = [Damy(env) for env in eval_envs]
     acts = train_envs[0].action_space
     print("Action Space", acts)
     config.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
@@ -254,15 +287,17 @@ def main(config):
     if not config.offline_traindir:
         prefill = max(0, config.prefill - count_steps(config.traindir))
         print(f"Prefill dataset ({prefill} steps).")
+        # [CoDreamer] 多智能体下策略看到的 batch 是 队伍数 × 每队 agent 数
+        batch = config.envs * config.num_agents
         if hasattr(acts, "discrete"):
             random_actor = tools.OneHotDist(
-                torch.zeros(config.num_actions).repeat(config.envs, 1)
+                torch.zeros(config.num_actions).repeat(batch, 1)
             )
         else:
             random_actor = torchd.independent.Independent(
                 torchd.uniform.Uniform(
-                    torch.tensor(acts.low).repeat(config.envs, 1),
-                    torch.tensor(acts.high).repeat(config.envs, 1),
+                    torch.tensor(acts.low).repeat(batch, 1),
+                    torch.tensor(acts.high).repeat(batch, 1),
                 ),
                 1,
             )
@@ -272,7 +307,7 @@ def main(config):
             logprob = random_actor.log_prob(action)
             return {"action": action, "logprob": logprob}, None
 
-        state = tools.simulate(
+        state = collect(
             random_agent,
             train_envs,
             train_eps,
@@ -307,7 +342,7 @@ def main(config):
         if config.eval_episode_num > 0:
             print("Start evaluation.")
             eval_policy = functools.partial(agent, training=False)
-            tools.simulate(
+            collect(
                 eval_policy,
                 eval_envs,
                 eval_eps,
@@ -320,7 +355,7 @@ def main(config):
                 video_pred = agent._wm.video_pred(next(eval_dataset))
                 logger.video("eval_openl", to_np(video_pred))
         print("Start training.")
-        state = tools.simulate(
+        state = collect(
             agent,
             train_envs,
             train_eps,
