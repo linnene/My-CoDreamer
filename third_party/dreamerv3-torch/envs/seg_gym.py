@@ -101,6 +101,11 @@ class SequentialEstimateGameEnv:
             }
         )
         self.action_space = gym.spaces.Discrete(self.spec.num_actions)
+        # 上游约定：离散环境自己给动作空间打这个标记（atari.py / crafter.py /
+        # memorymaze.py / OneHotAction 都这么做）。dreamer.py 靠它选择
+        # OneHotDist 作为预填阶段的随机策略；配置里也要相应设
+        # actor: {dist: 'onehot'}。
+        self.action_space.discrete = True
         self.reward_range = (-np.inf, 0.0)
 
         # 常数：one-hot agent index，形状 (N, N)
@@ -192,6 +197,8 @@ def _self_test() -> None:
     check("obs space 是单 agent 形状", env.observation_space["state"].shape == (d + n,),
           str(env.observation_space["state"].shape))
     check("action space 是 Discrete", isinstance(env.action_space, gym.spaces.Discrete))
+    check("action space 带 .discrete 标记（上游约定）",
+          getattr(env.action_space, "discrete", False) is True)
     check("action space size", env.action_space.n == a, str(env.action_space.n))
 
     # --- reset

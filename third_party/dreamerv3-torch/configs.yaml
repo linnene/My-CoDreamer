@@ -198,6 +198,8 @@ codreamer:
   eval_episode_num: 8
   log_every: 2e3
   video_pred_log: false
+  # 离散动作：actor 用 onehot 分布（同 atari/crafter/memorymaze 的写法）
+  actor: {dist: 'onehot', std: 'none'}
   encoder: {mlp_keys: '.*', cnn_keys: '$^'}
   decoder: {mlp_keys: '.*', cnn_keys: '$^'}
 
