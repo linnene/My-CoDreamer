@@ -47,6 +47,25 @@ def smooth(y: np.ndarray, w: int) -> np.ndarray:
     return np.convolve(y, k, mode="valid")
 
 
+def split_segments(x: np.ndarray, y: np.ndarray, jump_factor: float = 5.0):
+    """把序列按 x 轴上的"大跳跃"切成多段。
+
+    为什么需要：预填阶段的所有点都堆在 x=0（那时 logger.step 还是 0，跑完才加上
+    prefill），而训练阶段的第一个点在 x≈1020。中间没有数据。如果不去切，
+    matplotlib 会把 x=0 的最后一个点直接连到 x=1020 的第一个点，
+    画出一条**不存在的直线**，看着像"数据很平滑"，实际是误导。
+    """
+    if len(x) < 2:
+        return [(x, y)]
+    gaps = np.diff(x)
+    positive = gaps[gaps > 0]
+    if len(positive) == 0:
+        return [(x, y)]
+    threshold = jump_factor * float(np.median(positive))
+    cuts = np.flatnonzero(gaps > threshold) + 1
+    return [(sx, sy) for sx, sy in zip(np.split(x, cuts), np.split(y, cuts)) if len(sx)]
+
+
 def setup_cjk_font() -> str | None:
     candidates = [
         "Noto Sans CJK JP", "Noto Sans CJK SC", "Noto Sans CJK TC",
@@ -85,16 +104,27 @@ def main() -> int:
     ax = axes[0, 0]
     x, y = series(rows, "train_return")
     if len(x):
-        ax.plot(x, y, alpha=0.25, lw=0.8, color="tab:blue", label="每局回报")
-        ys = smooth(y, args.smooth)
-        if len(ys) == len(y):
-            ax.plot(x, ys, lw=1.2, color="tab:blue")
-        else:
-            ax.plot(x[args.smooth - 1:], ys, lw=2.0, color="tab:blue",
-                    label=f"滑动平均 (w={args.smooth})")
+        # 原始点只画散点，不连线 —— 避免跨越数据断层画出不存在的直线
+        ax.plot(x, y, ls="none", marker=".", ms=3, alpha=0.45,
+                color="tab:blue", label="每局回报")
+        # 滑动平均按分段分别算，不跨断层
+        for seg_x, seg_y in split_segments(x, y):
+            ys = smooth(seg_y, args.smooth)
+            if len(ys) == len(seg_y):
+                ax.plot(seg_x, ys, lw=1.2, color="tab:blue")
+            elif len(ys):
+                ax.plot(seg_x[len(seg_y) - len(ys):], ys, lw=2.0, color="tab:blue",
+                        label=f"滑动平均 (w={args.smooth})")
         ax.axhline(0, color="black", lw=0.8, ls="--")
         ax.text(0.02, 0.96, "0 = 满分（猜中目标）", transform=ax.transAxes,
                 fontsize=9, va="top")
+        # 标出预填阶段（全部堆在 x=0）
+        if (x == x.min()).sum() > 5 and x.min() == 0:
+            ax.annotate(f"预填 {int((x == 0).sum())} 局\n（随机策略，都堆在 step=0）",
+                        xy=(0, float(np.mean(y[x == 0]))),
+                        xytext=(0.14, 0.30), textcoords="axes fraction",
+                        fontsize=8, color="dimgray",
+                        arrowprops=dict(arrowstyle="->", color="dimgray", lw=0.8))
     ax.set_title("① 训练回报 train_return（每完成一局记一个点）")
     ax.set_xlabel("agent 步")
     ax.set_ylabel("回报")
