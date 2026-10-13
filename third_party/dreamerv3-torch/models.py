@@ -179,7 +179,12 @@ class WorldModel(nn.Module):
             k: torch.tensor(v, device=self._config.device, dtype=torch.float32)
             for k, v in obs.items()
         }
-        obs["image"] = obs["image"] / 255.0
+        # [CoDreamer] 上游无条件做 obs["image"] /= 255；向量观测环境（如我们的
+        # Sequential Estimate Game）根本不存在 "image" 这个 key，会 KeyError。
+        # 改为条件执行。登记于 docs/reproduction-plan.md「改动清单」。
+        # 保留原行为：有 image 就照旧归一化。
+        if "image" in obs:
+            obs["image"] = obs["image"] / 255.0
         if "discount" in obs:
             obs["discount"] *= self._config.discount
             # (batch_size, batch_length) -> (batch_size, batch_length, 1)
