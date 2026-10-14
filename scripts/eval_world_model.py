@@ -185,6 +185,41 @@ def openloop(wm, data, config, horizons, max_horizon: int):
     return out
 
 
+def plot(results: dict, out: pathlib.Path, groups: list[str] | None = None) -> None:
+    """误差随 horizon 的曲线。名字里的 -sN 后缀用来分组（IDreamer / CoDreamer）。"""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    metrics = [
+        ("cont_mae", "continuation 预测误差（MAE）"),
+        ("kl", "开环隐状态漂移（prior vs posterior 的 KL）"),
+    ]
+    fig, axes = plt.subplots(1, len(metrics), figsize=(6.0 * len(metrics), 4.4))
+    colors = {"IDreamer": "#3b6ea5", "CoDreamer": "#c1554b"}
+    for ax, (key, title) in zip(axes, metrics):
+        for name, rows in results.items():
+            base = name.split("-")[0]
+            hs = sorted(int(h) for h in rows)
+            ys = [rows[str(h) if str(h) in rows else h][key] for h in hs]
+            ax.plot(hs, ys, marker="o", ms=4, lw=1.4, alpha=0.85,
+                    color=colors.get(base, None), label=name)
+        ax.set_xlabel("open-loop horizon (steps without observations)")
+        ax.set_title(title, fontsize=10)
+        ax.grid(alpha=0.3)
+        if key == "cont_mae":
+            ax.legend(fontsize=7, ncol=1)
+    fig.suptitle(
+        "held-out open-loop prediction: no observations after the start, frozen graph",
+        fontsize=10,
+    )
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    print(f"  图已保存: {out}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", action="append", required=True, help="名称=路径")
@@ -193,6 +228,7 @@ def main() -> int:
     ap.add_argument("--teams", type=int, default=40, help="held-out rollout 采几支队")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--out-json", default=None)
+    ap.add_argument("--out", default=None, help="误差-水平线图（png）")
     args = ap.parse_args()
 
     ckpts = []
@@ -258,10 +294,12 @@ def main() -> int:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(results, ensure_ascii=False, indent=1))
         print(f"\n  已保存 {p}")
+    if args.out:
+        plot(results, pathlib.Path(args.out).expanduser())
 
     print(
-        "\n  说明：全部是 held-out（evaldir）上的**开环**误差 —— 只喂真实动作、"
-        "\n  不再看观测。曲线随 horizon 上升多少，才是世界模型\"想得准不准\"。"
+        "\n  说明：全部是 held-out 上的**开环**误差 —— 只喂真实动作、不再看观测。"
+        "\n  曲线随 horizon 上升多少，才是世界模型\"想得准不准\"。"
     )
     return 0
 
