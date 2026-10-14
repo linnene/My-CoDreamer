@@ -94,7 +94,35 @@ CoCoMARL workshop @ RLC 2024，Edan Toledo / Amanda Prorok）。**无官方代�
 2. "only the reward and terminal state prediction heads use communication, while **the decoder head remains independent**"
 3. "graphs of observations $G_o^t$ … graphs of stochastic posterior $G_z^t$ and prior $\hat G_z^t$ … recurrent states are also represented as graphs $G_h^t$"
 
-表 2 只给了一个约束：`RSSM GNN Layers = 1`。
+表 2 与表 3 给出了完整的 GNN 配置（**已查清**）：
+
+```
+Table 2 World Model Size          Table 3 Actor-Critic Model Size
+  GRU recurrent units     512       Dense hidden units   512
+  Dense hidden units      512       MLP layers           2
+  MLP layers              2         GNN Layers           1     ← k=1
+  RSSM GNN Layers         1  ← k=1  Actor Parameters     1.6M
+  Reward & Cont GNN Layers 1 ← k=1  Critic Parameters    1.7M
+  Vector Environment Params 16M
+```
+
+**三处各 1 层，k=1。** 且 Table 2 的 16M 已经是**含两层 GNN 之后**的数字。
+
+### 参数量的矛盾（待校准，尚未解决）
+
+| | 我们 | 论文 | 差 |
+|---|---|---|---|
+| 世界模型 | 16,429,829（**不含 GNN**） | 16M（**含 GNN**） | 我们偏大 |
+| actor | 1,052,676 | 1.6M | 0.55M |
+| critic | 1,181,439 | 1.7M | 0.52M |
+
+而我们自己实现的 1 层 GATv2(dim=512) = **1,312,768**，是那个缺口的 **2.4 倍**。
+
+**结论：论文那层 GNN 不是标准 GATv2 的规模。** 可能它作用在更小的维度上，
+或得分函数与值变换共享了权重，或少了 skip 投影。**不靠猜去凑数字** ——
+先按标准 GATv2 实现，如实记录偏差，等 actor/critic 接完线用实测缺口倒推。
+（一个有意思的巧合：`2d² = 2×512² = 524,288` 恰好等于 critic 的缺口 0.52M。
+但这不足以当结论。）
 
 ### 已有的推理
 
@@ -122,13 +150,13 @@ actor、critic 共用）会**全部自动带上通信信息**。
 
 ### 其他必须自己定的数值（论文未给）
 
-| # | 缺口 | 影响 |
-|---|---|---|
-| 1 | GATv2 的 hidden dim / head 数 | 参数量 |
-| 2 | 通信范围 $C$（VMAS 三个任务各自的值） | 图密度 |
-| 3 | 边特征如何注入 GATv2（GATv2 原生不支持边特征） | 架构选择 |
-| 4 | CoDreamer 是否也给观测拼 one-hot agent index（论文只说 IDreamer 加了） | 对比公平性 |
-| 5 | VMAS 里位置 $p_i$ 从哪来（观测内？环境特权信息？执行时是否可得） | **可行性** |
+| # | 缺口 | 影响 | 当前处理 |
+|---|---|---|---|
+| 1 | GATv2 的 head 数 | 参数量 | 取 1（保守；heads 只改注意力粒度数） |
+| 2 | 通信范围 $C$（VMAS 三个任务各自的值） | 图密度 | 待定（VMAS 阶段） |
+| 3 | 边特征如何注入 GATv2（原版 GATv2 没有边特征） | 架构选择 | **本实现把 $W_e E_{ij}$ 加进得分**：$e_{ij}=a^\top\mathrm{LeakyReLU}(W_l h_i + W_r h_j + W_e E_{ij})$。论文只说 "edge features ... are used with observations in the GAT V2 to calculate attention coefficients"，没给公式 |
+| 4 | CoDreamer 是否也给观测拼 one-hot agent index（论文只说 IDreamer 加了） | 对比公平性 | **是**（两边都拼）—— 否则 CoDreamer 与 IDreamer 的差异不止 GNN |
+| 5 | VMAS 里位置 $p_i$ 从哪来（观测内？环境特权信息？执行时是否可得） | **可行性** | 待定（VMAS 阶段） |
 
 第 5 条最容易被忽略：GNN 建图需要 $p_i$，若它不在观测里、只有仿真器知道，
 那"去中心化执行"就打了折扣。
@@ -181,11 +209,13 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `dreamer.py` | `make_env` 增加 `seg` 分支（队伍级环境，直接返回不接 gym wrapper 链） | 步骤 1 | `# [CoDreamer]` |
 | `dreamer.py` | `main()`：读 `env.num_agents`；多智能体时跳过 `Damy`/`Parallel`；预填随机策略的 batch 改为 `envs*num_agents`；三处收集调用改为 `collect`（= `tools_marl.simulate_marl`）；**train_ratio 自动补偿** | 步骤 1 | `# [CoDreamer]` |
 | `configs.yaml` | 新增 `codreamer` 配置块（`seg` 任务、队伍数、超参） | 步骤 1 | `# [CoDreamer]` |
-| `models.py` | `preprocess` 里 `obs["image"] /= 255` 改为条件执行（向量观测环境没有 image key） | 步骤 1 | `# [CoDreamer]` |
-| `dreamer.py` | `_train` 增加 `update_behavior` 分支：预训练阶段**只更新世界模型**，跳过 actor-critic 与探索策略。上游无条件两者都训，与论文 D.3 的 "before any behaviour is learnt" 不符 | 步骤 1 | `# [CoDreamer]` |
+| `models.py` | `preprocess` 里 `obs["image"] /= 255` 改为条件执行（向量观测环境没有 image key） | 步骤 1 | `# [CoDreamer]` || `dreamer.py` | `_train` 增加 `update_behavior` 分支：预训练阶段**只更新世界模型**，跳过 actor-critic 与探索策略。上游无条件两者都训，与论文 D.3 的 "before any behaviour is learnt" 不符 | 步骤 1 | `# [CoDreamer]` |
 | `dreamer.py` | `make_env` 的 `seg` 分支改为用 `config.seg_*` 构造 `Spec`，并传 `obs_mode` / `graph_obs`；默认值与论文 Table 1 一致 | 跨步对比 + 步骤 2 | `# [CoDreamer]` |
 | `configs.yaml` | `codreamer` 块增加 `seg_*` 环境规格键（`num_agents` / `horizon` / `num_actions` / `edge_density` / `local_state_ratio` / `target_transform` / `obs_mode` / `graph_obs`）。每个键都会自动变成命令行参数 | 跨步对比 + 步骤 2 | `# [CoDreamer]` |
 | `configs.yaml` | `encoder`/`decoder` 的 `mlp_keys` 由 `.*` 改为 `^(?!adjacency$)(?!edge_features$).*`，把图拓扑（邻接矩阵行、边特征行）挡在 encoder/decoder 之外 —— 它们只给 GNN 用，不是要编码/重建的特征。默认（`seg_graph_obs: false`）下行为与 `.*` 完全一致 | 步骤 2 | `# [CoDreamer]` |
+| `configs.yaml` | `batch_size` 改为 8：图批次下它的单位是**队伍数**，论文 B=16 在 12GB 上会 OOM（实测 12 队可行、16 队不行） | 步骤 2 | `# [CoDreamer]` |
+| `models.py` | 新增 `fold_agent_axis`；`_train` 开头把 `(B,T,N,·)` 折成 `(B*N,T,·)` | 步骤 2 | `# [CoDreamer]` |
+| `dreamer.py` | `main()` 多智能体时改用 `tools_marl.make_graph_dataset` 构造训练集；`video_pred_log` 与之互斥（未适配会直接报错） | 步骤 2 | `# [CoDreamer]` |
 
 新增文件（不在上游清单里，因此不影响"清单不一致 ⟺ 真改了"这个不变式）：
 
@@ -193,7 +223,9 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 |---|---|
 | `envs/seg.py` | Sequential Estimate Game 本体（纯 numpy） |
 | `envs/seg_gym.py` | 队伍级 gym 包装 |
-| `tools_marl.py` | 多智能体收集循环（N 条独立 episode 流） |
+| `tools_marl.py` | 多智能体收集循环（N 条独立 episode 流）；队伍归组与**图采样器** `sample_episode_graphs` |
+| `networks_gnn.py` | GATv2 层 + 防过平滑跳连；`GraphAggregator(layers=0)` 是严格恒等 |
+| `scripts/test_graph_pipeline.py` | 数据管线 `(B,T,N,·)` 的**数值恒等**验收（阈值 0） |
 
 ### 步骤 0 远端实测记录（2026-10-12, Windows + RTX 4060 Laptop 8GB）
 
