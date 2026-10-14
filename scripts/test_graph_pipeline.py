@@ -478,8 +478,12 @@ def main() -> int:
     check("critic 因为 GNN 变多参数", n_v_on > n_v_off, f"+{n_v_on - n_v_off:,}")
 
     # --- 想象轨迹对图是否敏感
+    #
+    # 注意 start 必须是 (B, T, N, ·)：`_imagine` 自己会把 (B,T) 合并成轨迹维，
+    # 它是按 "batch 在前、time 其次" 写的。若直接传 (B*T, N, ·)，flatten 会把 N
+    # 当成事件维，形状静默错位。（本测试最初就是这么错的。）
     horizon = 3
-    start = wm_on.dynamics.initial((b * t, n))
+    start = wm_on.dynamics.initial((b, t, n))
     adj0 = torch.as_tensor(batch["adjacency"]).reshape(b * t, n, n).clone()
     edge0 = torch.as_tensor(batch["edge_features"]).reshape(b * t, n, n, 1).clone()
     adj1 = adj0.clone()
@@ -493,7 +497,7 @@ def main() -> int:
         check("开了 GNN：改图会改变想象的轨迹（图确实传进了 img_step）",
               d_on > 1e-6, f"max|\u0394|={d_on:.3e}")
 
-        start0 = wm_off.dynamics.initial((b * t, n))
+        start0 = wm_off.dynamics.initial((b, t, n))
         g_a, _, _ = imag_off._imagine(start0, imag_off.actor, horizon, graph=(adj0, edge0))
         g_b, _, _ = imag_off._imagine(start0, imag_off.actor, horizon, graph=(adj1, edge0))
         d_off = float((g_a - g_b).abs().max())
@@ -514,7 +518,7 @@ def main() -> int:
               not torch.allclose(v0, v1), f"max|\u0394|={float((v0 - v1).abs().max()):.3e}")
 
     # --- 端到端：带 agent 轴的完整想象 + 损失反传
-    start_e = wm_on.dynamics.initial((b * t, n))
+    start_e = wm_on.dynamics.initial((b, t, n))
     rew = lambda f, s, a: wm_on.heads["reward"](
         wm_on.dynamics.get_feat(s), graph=(adj0, edge0)
     ).mode()
