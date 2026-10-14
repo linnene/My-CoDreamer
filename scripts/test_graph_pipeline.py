@@ -142,6 +142,16 @@ def train_once(config, obs_space, batch, num_agents_override: int, seed: int,
     tools.set_seed_everywhere(seed)
     wm = models.WorldModel(obs_space, _DummyActSpace(), 0, cfg)
     n_params = sum(p.numel() for p in wm.parameters())
+    # ★ 建完模型后**再种一次种子** ★
+    #
+    # 为什么必需：不同架构的参数个数不同，**建模型时消耗的随机数个数也不同**，
+    # 于是全局 RNG 状态被推到不同位置。而 RSSM 的先验/后验是用 `dist.sample()` 
+    # 采样的，采样结果就会不一样 —— 于是所有权重未变的模块（比如 decoder）也
+    # 跟着算出不同的损失，把"只有 reward/cont 变了"这个结论淹没掉。
+    #
+    # 重新种一次，两次比较就从**同一个 RNG 状态**出发前向；差异只可能来自架构本身。
+    # （曾被 [6] 节里 state_loss / kl 竟然也变化这一现象发现。）
+    tools.set_seed_everywhere(seed)
     # WorldModel._train 返回 (post, context, metrics)，取第三个
     _post, _context, mets = wm._train(dict(batch))
     return mets, n_params
