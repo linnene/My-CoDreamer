@@ -105,11 +105,13 @@ def main() -> int:
     import matplotlib.pyplot as plt
 
     n_panels = 4 if deploy else 3
-    # sharex：① 与 ③ 的横轴范围不同（损失日志会延续到 Phase 2），
-    # 不共享的话两根切断竖线在两图里位置不一致，很容易看错。
-    fig, axes = plt.subplots(1, n_panels, figsize=(5.2 * n_panels, 4.4), sharex=True)
+    # sharex：①②③ 共享横轴，切断竖线在三图里对齐，不容易看错。
+    # **不能带上 ④** —— 它是 1..4 的**分类**轴，被拉到 0..1900 后箱体会全挤到左边。
+    fig, axes = plt.subplots(1, n_panels, figsize=(5.2 * n_panels, 4.4))
     if n_panels == 1:
         axes = [axes]
+    for _ax in axes[1 : (n_panels - 1 if deploy else n_panels)]:
+        _ax.sharex(axes[0])
 
     # ---------------------------------------------------------- ① 全周期
     ax = axes[0]
