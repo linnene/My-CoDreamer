@@ -221,6 +221,9 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `models.py` | `WorldModel.__init__` 把 `gnn_layers` / 边特征维度（取自 `edge_features` 的末维）/ `gnn_heads` 传给 RSSM | 步骤 2 | `# [CoDreamer]` |
 | `models.py` | `ImagBehavior._imagine` **临时**把 agent 轴也折进 batch（upstream 的 `lambda_return` 末尾写死 `reshape([shape[0], shape[1], 1])`，带 agent 轴改动面很大）。**步骤 5 要取消这一步**，同时给 AC 加 GNN 并把冻结的起点图喂给想象轨迹 | 步骤 2（临时） | `# [CoDreamer]` |
 | `configs.yaml` | 新增 `gnn_layers`（默认 0 = IDreamer）与 `gnn_heads` | 步骤 2 | `# [CoDreamer]` |
+| `networks.py` | `MLP` 新增 `gnn_layers` / `gnn_edge_dim` / `gnn_heads`，在 **self.layers 的隐层输出**上做邻域聚合（不是头的 1536 维输入 —— GATv2 是 5·d²，那里是 1180 万参数）；`forward` 多一路 `graph` 参数 | 步骤 2 | `# [CoDreamer]` |
+| `models.py` | reward / cont 两个头接 GNN；新增 `_comm_heads`。**decoder 不接** —— 论文："only the reward and terminal state prediction heads use communication, while the decoder head remains independent" | 步骤 2 | `# [CoDreamer]` |
+| `configs.yaml` | 新增 `gnn_head_layers`（默认 0；论文 Table 2 = 1） | 步骤 2 | `# [CoDreamer]` |
 | `dreamer.py` | `main()` 多智能体时改用 `tools_marl.make_graph_dataset` 构造训练集；`video_pred_log` 与之互斥（未适配会直接报错） | 步骤 2 | `# [CoDreamer]` |
 
 新增文件（不在上游清单里，因此不影响"清单不一致 ⟺ 真改了"这个不变式）：
