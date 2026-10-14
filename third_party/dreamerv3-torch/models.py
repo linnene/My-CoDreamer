@@ -1,3 +1,4 @@
+import numpy as np
 import copy
 import torch
 from torch import nn
@@ -6,6 +7,31 @@ import networks
 import tools
 
 to_np = lambda x: x.detach().cpu().numpy()
+
+
+# [CoDreamer] 图批次 (B, T, N, ·) -> 展平批次 (B*N, T, ·)
+def fold_agent_axis(data):
+    """把样本内部的 agent 轴折进 batch 维。
+
+    数据管线（tools_marl.sample_episode_graphs）产出的是 (B, T, N, ·)：N 是**样本
+    内部**的一个轴，因为它同一时刻的 N 个 agent 必须能互相看见（GNN 要在它上面聚合）。
+
+    但 IDreamer 的语义是"每个 agent 各训各的"，agent 之间没有信息流动，所以把 N
+    折进 batch 与分开训练**完全等价** —— 前向是逐样本独立的，也没有 BatchNorm。
+    折完之后 encoder / RSSM / 各预测头 / actor-critic 一行都不用改。
+
+    CoDreamer 则相反：GNN 正是要在 agent 轴上聚合，所以不能折。
+    验收标准：GNN 层数为 0 时，折平的损失必须与不折的同一份数据完全一致。
+    """
+    out = {}
+    for key, value in data.items():
+        value = np.asarray(value)
+        assert value.ndim >= 3, (
+            f"expected (B, T, N, ...) for folding, got {key}={value.shape}"
+        )
+        b, t, n = value.shape[:3]
+        out[key] = value.reshape((b * n, t) + value.shape[3:])
+    return out
 
 
 class RewardEMA:
@@ -110,6 +136,12 @@ class WorldModel(nn.Module):
         # image (batch_size, batch_length, h, w, ch)
         # reward (batch_size, batch_length)
         # discount (batch_size, batch_length)
+        #
+        # [CoDreamer] 多智能体时 data 来自图采样器，形状是 (B, T, N, ·)。
+        # IDreamer 语义下 N 个 agent 互不干扰，折进 batch 与分开训练等价，
+        # 折完之后下面整条链路一行都不用改（见 fold_agent_axis）。
+        if self._config.num_agents > 1:
+            data = fold_agent_axis(data)
         data = self.preprocess(data)
 
         with tools.RequiresGrad(self):
@@ -175,6 +207,9 @@ class WorldModel(nn.Module):
 
     # this function is called during both rollout and training
     def preprocess(self, obs):
+        # [CoDreamer] 注意：图批次 (B,T,N,·) 的折平**不在这里**做。
+        # `_policy` 也调 preprocess，而它拿到的是 simulate_marl 铺平的 (B*N, ·)，
+        # 那里没有 agent 轴。折平只属于 _train（见那里的 fold_agent_axis）。
         obs = {
             k: torch.tensor(v, device=self._config.device, dtype=torch.float32)
             for k, v in obs.items()

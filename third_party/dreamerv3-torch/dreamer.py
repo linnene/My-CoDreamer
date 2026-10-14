@@ -352,7 +352,21 @@ def main(config):
         print(f"Logger: ({logger.step} steps).")
 
     print("Simulate agent.")
-    train_dataset = make_dataset(train_eps, config)
+    # [CoDreamer] 多智能体时用【图采样器】：每次吐一张图 (T, N, ·)，
+    # B 张堆起来即 (B, T, N, ·)。与上游 sample_episodes 的唯一区别是同一时刻的
+    # N 个 agent 切在同一份样本里 —— 这是 GNN 能在 agent 轴上聚合的前提。
+    # config.batch_size 在这里的单位是【队伍数】，不是序列数（见 tools_marl.make_graph_dataset）。
+    #
+    # eval_dataset 仍用上游采样器：它只服务于 video_pred，而 video_pred 走的是
+    # 单序列形状。config.video_pred_log 为 true 时多智能体路径需要另行适配。
+    if multi_agent:
+        if config.video_pred_log:
+            raise NotImplementedError(
+                "multi-agent + video_pred_log 尚未适配：(B,T,N,·) 需要图版本的 video_pred"
+            )
+        train_dataset = tools_marl.make_graph_dataset(train_eps, config)
+    else:
+        train_dataset = make_dataset(train_eps, config)
     eval_dataset = make_dataset(eval_eps, config)
     agent = Dreamer(
         train_envs[0].observation_space,

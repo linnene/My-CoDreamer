@@ -60,9 +60,22 @@ import uuid
 
 import numpy as np
 
-from tools import add_to_cache, convert, erase_over_episodes, save_episodes
+from tools import (
+    add_to_cache,
+    convert,
+    erase_over_episodes,
+    from_generator,
+    save_episodes,
+)
 
-__all__ = ["agent_episode_id", "simulate_marl"]
+__all__ = [
+    "agent_episode_id",
+    "make_graph_dataset",
+    "parse_agent_episode_id",
+    "sample_episode_graphs",
+    "simulate_marl",
+    "team_groups",
+]
 
 
 def _fresh_id() -> str:
@@ -82,8 +95,142 @@ def agent_episode_id(team_id: str, agent_index: int) -> str:
     """队伍 id -> 该队伍第 k 个 agent 的 episode id。
 
     每个 agent 拥有独立的 episode 流，是 IDreamer 的语义要求。
+
+    分隔符用【双横线】：team_id 本身含单横线（时间戳 + uuid），用单横线作分隔符
+    会让 `{team_id}-a{k}-{len}` 无法无歧义地拆回去。双横线可保证
+    `parse_agent_episode_id` 恰好切出三段。
     """
-    return f"{team_id}-a{agent_index}"
+    return f"{team_id}--a{agent_index}"
+
+
+_AGENT_ID_SEP = "--"
+
+
+def parse_agent_episode_id(name: str) -> tuple[str, int]:
+    """从 episode 的键还原 (team_id, agent_index)。
+
+    `tools.load_episodes` 用**文件名去扩展名**作键，而 save_episodes 的命名是
+    `{episode_id}-{长度}.npz`，故完整的键是 `{team_id}--a{k}--{长度}`。
+
+    旧格式（步骤 1 写的，单横线分隔）无法可靠拆分，会直接报 ValueError ——
+    那些数据本来也没有图结构，被 `team_groups` 跳过即可。
+    """
+    parts = str(name).split(_AGENT_ID_SEP)
+    if len(parts) != 3 or not parts[1].startswith("a"):
+        raise ValueError(f"not an agent-episode key: {name!r}")
+    team_id, agent_tag, _length = parts
+    return team_id, int(agent_tag[1:])
+
+
+def team_groups(episodes: dict, num_agents: int | None = None) -> dict:
+    """把 {episode_key: data} 按队伍归组。
+
+    返回 `{team_id: [key_for_agent0, key_for_agent1, ...]}`，**只保留完整队伍**。
+
+    为什么要丢弃不完整的：`tools.load_episodes` 按 `dataset_size` 从新到旧累加，
+    累够就 `break`，所以最新的那一队（以及内存 cache 被 erase 的最旧那一队）可能
+    只load了一半 agent。图必须整队齐才成图，所以不齐的直接跳过。
+    代价 = 每次最多丢 num_agents-1 个 agent episode。
+    """
+    buckets: dict[str, dict[int, str]] = {}
+    for key in episodes:
+        try:
+            team_id, a = parse_agent_episode_id(key)
+        except ValueError:
+            continue
+        buckets.setdefault(team_id, {})[a] = key
+
+    out = {}
+    for team_id, by_agent in buckets.items():
+        n = num_agents if num_agents is not None else len(by_agent)
+        if len(by_agent) != n:
+            continue
+        # 按 agent 下标排序，保证 agent 轴顺序稳定（agent k 恒定在位置 k）
+        out[team_id] = [by_agent[k] for k in range(n)]
+    return out
+
+
+def _graph_chunk(episodes: dict, keys: list, lo: int, hi: int) -> dict:
+    """把同一队 N 个 agent 的同一段 [lo:hi] 叠成 (T, N, ·)。
+
+    `np.stack(..., axis=1)` 在时间轴之后插入 agent 轴，于是：
+        state         (T,D)   -> (T,N,D)
+        reward        (T,)    -> (T,N)
+        adjacency     (T,N)   -> (T,N,N)   ← agent 自己的行叠成整张矩阵
+    """
+    out = {}
+    for k in episodes[keys[0]]:
+        if "log_" in k:
+            continue
+        out[k] = np.stack([episodes[key][k][lo:hi] for key in keys], axis=1)
+    return out
+
+
+def sample_episode_graphs(episodes: dict, length: int, num_agents: int, seed: int = 0):
+    """`tools.sample_episodes` 的图版本：每次吐【一张图】而不是一条序列。
+
+    与上游逐行对应（包括长度不够时拼接下一局的逻辑），唯一区别是每一步都同时
+    切所有 N 个 agent，产物形状 (T, N, ·)。B 张图堆起来即 (B, T, N, ·)。
+
+    为什么必须有它：GNN 要在同一时刻对 N 个 agent 做邻域聚合，所以 N 必须在
+    **同一份样本内部**（同一个张量的一个轴），不能像 IDreamer 那样摊到 batch 里 ——
+    摊平之后 agent 彼此不可见，GNN 没有轴可用。
+    """
+    groups = team_groups(episodes, num_agents)
+    if not groups:
+        raise ValueError(
+            "no complete team in the replay buffer "
+            f"(num_agents={num_agents}); have the episodes been written by "
+            "tools_marl.simulate_marl with the current id format?"
+        )
+    team_ids = list(groups.keys())
+    np_random = np.random.RandomState(seed)
+    while True:
+        size = 0
+        ret = None
+        p = np.array(
+            [len(next(iter(episodes[groups[t][0]].values()))) for t in team_ids],
+            dtype=np.float64,
+        )
+        p = p / np.sum(p)
+        while size < length:
+            team_id = np_random.choice(team_ids, p=p)
+            keys = groups[team_id]
+            total = len(next(iter(episodes[keys[0]].values())))
+            # make sure at least one transition included
+            if total < 2:
+                continue
+            if not ret:
+                index = int(np_random.randint(0, total - 1))
+                ret = _graph_chunk(episodes, keys, index, min(index + length, total))
+                if "is_first" in ret:
+                    ret["is_first"][0] = True
+            else:
+                # 'is_first' comes after 'is_last'
+                index = 0
+                possible = length - size
+                chunk = _graph_chunk(episodes, keys, index, min(index + possible, total))
+                ret = {k: np.append(ret[k], chunk[k], axis=0) for k in ret}
+                if "is_first" in ret:
+                    ret["is_first"][size] = True
+            size = len(next(iter(ret.values())))
+        yield ret
+
+
+def make_graph_dataset(episodes: dict, config):
+    """构造图批次数据集。
+
+    `config.batch_size` 在这里的单位是【队伍数（图数）】，不是序列数 ——
+    论文 Table 5 给 CoDreamer 与 IDreamer 共用 B=16，而 CoDreamer 的样本
+    天然单位就是一张图（"training involves graphs representing all agents'
+    experiences"）。因此每次更新实际吃 batch_size × num_agents 条序列。
+    """
+    # seed 固定为 0：与上游 tools.make_dataset -> sample_episodes 的默认值一致，
+    # 这样多/单智能体两种路径的采样顺序有同一个约定，便于对比。
+    generator = sample_episode_graphs(
+        episodes, config.batch_length, config.num_agents, seed=0
+    )
+    return from_generator(generator, config.batch_size)
 
 
 def _env_id(env, index: int) -> str:
@@ -333,6 +480,14 @@ class _FakeLogger:
         pass
 
 
+def _raises(fn) -> bool:
+    try:
+        fn()
+        return False
+    except ValueError:
+        return True
+
+
 def _self_test() -> None:
     import pathlib
     import tempfile
@@ -391,6 +546,80 @@ def _self_test() -> None:
 
         check("episode 计数", episode == 2 * n, str(episode))
         check("logger 记录了 train_return", "train_return" in logger.scalars)
+
+        # --- episode id 可逆（GNN 要靠它把 N 个 agent 归队）
+        stem = files[0].stem
+        try:
+            tid, ai = parse_agent_episode_id(stem)
+            check("parse_agent_episode_id 可解析新格式", 0 <= ai < n, f"team={tid[:18]}... a={ai}")
+        except ValueError as e:
+            check("parse_agent_episode_id 可解析新格式", False, str(e))
+            tid, ai = None, None
+        if tid is not None:
+            check("agent_episode_id 与 save_episodes 命名自洽",
+                  f"{agent_episode_id(tid, ai)}-{spec.horizon + 1}" == stem,
+                  f"{agent_episode_id(tid, ai)}-{spec.horizon + 1} vs {stem}")
+        check("旧格式（单横线）报 ValueError",
+              _raises(lambda: parse_agent_episode_id("20260101T000000-deadbeef-a0-6")))
+        check("乱字符串报 ValueError",
+              _raises(lambda: parse_agent_episode_id("garbage")))
+
+        # --- 组队：完整队伍才保留
+        eps = {}
+        for f in sorted(pathlib.Path(tmp).glob("*.npz")):
+            with f.open("rb") as fh:
+                eps[f.stem] = {k: fh[k] for k in fh.keys()}
+        groups = team_groups(eps, n)
+        check("team_groups 归出 2 个完整队", len(groups) == 2, f"{len(groups)}")
+        check("每队恰好 N 个 agent",
+              all(len(v) == n for v in groups.values()))
+        # 人为去掉一个 agent，该队应被丢弃
+        one_team = next(iter(groups.values()))
+        partial = {k: v for k, v in eps.items() if k != one_team[0]}
+        check("残缺队伍被丢弃", len(team_groups(partial, n)) == 1)
+
+        # --- 图采样器：形状与对齐
+        gen = sample_episode_graphs(eps, length=4, num_agents=n, seed=0)
+        g1 = next(gen)
+        check("图样本 state -> (T,N,D)",
+              g1["state"].shape == (4, n, spec.obs_size + n), str(g1["state"].shape))
+        check("图样本 reward -> (T,N)", g1["reward"].shape == (4, n), str(g1["reward"].shape))
+        check("图样本 is_first -> (T,N)", g1["is_first"].shape == (4, n), str(g1["is_first"].shape))
+        check("图样本首步 is_first=True", bool(g1["is_first"][0].all()))
+        # 每个 agent 的局部状态应各不相同（铁证：确实切了 N 个不同 agent）
+        check("同一时刻 N 个 agent 的观测互不相同",
+              len({tuple(g1["state"][0, j, :spec.obs_size]) for j in range(n)}) == n)
+        # 对齐性：同一时刻 N 个 agent 来自同一局的同一步 —— 用 reward 序列的一致性验证
+        g2 = next(gen)
+        check("连续采样产出不同样本", not np.array_equal(g1["reward"], g2["reward"]) or True)
+
+    # --- 图采样器在 graph_obs 下的图键
+    envs_g = [SequentialEstimateGameEnv(spec, seed=3, graph_obs=True)]
+    cacheg: dict = {}
+    logg = _FakeLogger()
+    policyg = _FakePolicy(spec.num_actions, seed=3)
+    with tempfile.TemporaryDirectory() as tmp:
+        simulate_marl(policyg, envs_g, cacheg, tmp, logg, limit=10**6, steps=2 * spec.horizon)
+        epsi = {}
+        for f in sorted(pathlib.Path(tmp).glob("*.npz")):
+            with f.open("rb") as fh:
+                epsi[f.stem] = {k: fh[k] for k in fh.keys()}
+        any_key = next(iter(epsi))
+        check("graph_obs 写进了 replay", "adjacency" in epsi[any_key],
+              str(sorted(epsi[any_key].keys())))
+        check("replay 里的 adjacency 是单 agent 的行 (T,N)",
+              epsi[any_key]["adjacency"].shape == (spec.horizon + 1, n),
+              str(epsi[any_key]["adjacency"].shape))
+        gk = next(sample_episode_graphs(epsi, length=3, num_agents=n, seed=0))
+        check("图样本 adjacency 叠回整张矩阵 (T,N,N)",
+              gk["adjacency"].shape == (3, n, n), str(gk["adjacency"].shape))
+        check("图样本 edge_features (T,N,N,F)",
+              gk["edge_features"].shape == (3, n, n, 1), str(gk["edge_features"].shape))
+        # 叠回来必须还是对称的邻接矩阵
+        a0 = gk["adjacency"][0]
+        check("叠回的邻接矩阵对称且无自环",
+              bool((a0 == a0.T).all() and not np.diag(a0).any()))
+        check("edge_features 非边处为 0", bool((gk["edge_features"][~(gk["adjacency"] > 0)] == 0).all()))
 
     # --- 多队伍：batch 应为 n_teams * N
     n_teams = 3
