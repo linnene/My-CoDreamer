@@ -424,7 +424,8 @@ class ImagBehavior(nn.Module):
                 if self._config.critic["slow_target"]:
                     value_loss -= value.log_prob(slow_target.mode().detach())
                 # (time, batch, 1), (time, batch, 1) -> (1,)
-                value_loss = torch.mean(weights[:-1] * value_loss[:, :, None])
+                # [CoDreamer] 同上：`[:, :, None]` 写死两维，改为轴无关写法
+                value_loss = torch.mean(weights[:-1] * value_loss[..., None])
 
         metrics.update(tools.tensorstats(value.mode(), "value"))
         metrics.update(tools.tensorstats(target, "target"))
@@ -511,7 +512,9 @@ class ImagBehavior(nn.Module):
         inp = imag_feat.detach()
         policy = self.actor(inp)
         # Q-val for actor is not transformed using symlog
-        target = torch.stack(target, dim=1)
+        # [CoDreamer] 上游这里是 `target = torch.stack(target, dim=1)`：因为旧的
+        # lambda_return 返回的是沿 batch 维 unbind 出的元组。现在它直接返回带时间轴
+        # 的张量 (time, *batch, 1)，不再需要 stack。
         if self._config.reward_EMA:
             offset, scale = self.reward_ema(target, self.ema_vals)
             normed_target = (target - offset) / scale
@@ -526,13 +529,15 @@ class ImagBehavior(nn.Module):
         if self._config.imag_gradient == "dynamics":
             actor_target = adv
         elif self._config.imag_gradient == "reinforce":
+            # [CoDreamer] `[:, :, None]` 写死两维；带 agent 轴时会把轴插错位置
+            # （(T,B,N) -> (T,B,1,N)）。`[..., None]` 对三维输入完全等价。
             actor_target = (
-                policy.log_prob(imag_action)[:-1][:, :, None]
+                policy.log_prob(imag_action)[:-1][..., None]
                 * (target - self.value(imag_feat[:-1]).mode()).detach()
             )
         elif self._config.imag_gradient == "both":
             actor_target = (
-                policy.log_prob(imag_action)[:-1][:, :, None]
+                policy.log_prob(imag_action)[:-1][..., None]
                 * (target - self.value(imag_feat[:-1]).mode()).detach()
             )
             mix = self._config.imag_gradient_mix

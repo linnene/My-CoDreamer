@@ -676,23 +676,29 @@ class TanhBijector(torchd.Transform):
 
 
 def static_scan_for_lambda_return(fn, inputs, start):
+    """反向累积 λ-return。返回张量 `(time, *batch_shape)`。
+
+    [CoDreamer] 上游版本把逐步结果用 `torch.cat(..., dim=-1)` 堆在**最后一维**，
+    末尾再写死
+
+        outputs = torch.reshape(outputs, [shape[0], shape[1], 1])
+        outputs = torch.flip(outputs, [1])
+        outputs = torch.unbind(outputs, dim=0)
+
+    即隐含假设张量是 `(batch, time)`、且所有尾维都是 1。多智能体下多了一根 agent 轴
+    （例如 `(time, batch, agent, 1)`），那个 reshape 会把 agent 轴揽乱。
+
+    本实现改成显式地在 dim 0 上堆时间步，对任意尾维都成立。返回约定也随之明确为
+    一个张量（上游是沿 batch 维 unbind 出的元组），调用方不再需要 `torch.stack`。
+    """
     last = start
-    indices = range(inputs[0].shape[0])
-    indices = reversed(indices)
-    flag = True
-    for index in indices:
-        # (inputs, pcont) -> (inputs[index], pcont[index])
+    collected = []
+    for index in reversed(range(inputs[0].shape[0])):
         inp = lambda x: (_input[x] for _input in inputs)
         last = fn(last, *inp(index))
-        if flag:
-            outputs = last
-            flag = False
-        else:
-            outputs = torch.cat([outputs, last], dim=-1)
-    outputs = torch.reshape(outputs, [outputs.shape[0], outputs.shape[1], 1])
-    outputs = torch.flip(outputs, [1])
-    outputs = torch.unbind(outputs, dim=0)
-    return outputs
+        collected.append(last)
+    collected.reverse()  # 上面的循环是倒着走的，这里翻回正序
+    return torch.stack(collected, dim=0)
 
 
 def lambda_return(reward, value, pcont, bootstrap, lambda_, axis):
@@ -704,10 +710,11 @@ def lambda_return(reward, value, pcont, bootstrap, lambda_, axis):
         pcont = pcont * torch.ones_like(reward)
     dims = list(range(len(reward.shape)))
     dims = [axis] + dims[1:axis] + [0] + dims[axis + 1 :]
+    # [CoDreamer] 只支持 axis=0（重写后 time 轴天然在 dim 0）。上游对 axis!=0 的
+    # 处理本来就与它末尾写死的 reshape 不自洽，而本仓库只有 models.py 一处调用、
+    # 传的是 axis=0。与其留一个未经验证的分支，不如明确报错。
     if axis != 0:
-        reward = reward.permute(dims)
-        value = value.permute(dims)
-        pcont = pcont.permute(dims)
+        raise NotImplementedError(f"lambda_return only supports axis=0, got {axis}")
     if bootstrap is None:
         bootstrap = torch.zeros_like(value[-1])
     next_values = torch.cat([value[1:], bootstrap[None]], 0)
@@ -716,12 +723,9 @@ def lambda_return(reward, value, pcont, bootstrap, lambda_, axis):
     #    lambda agg, cur0, cur1: cur0 + cur1 * lambda_ * agg,
     #    (inputs, pcont), bootstrap, reverse=True)
     # reimplement to optimize performance
-    returns = static_scan_for_lambda_return(
+    return static_scan_for_lambda_return(
         lambda agg, cur0, cur1: cur0 + cur1 * lambda_ * agg, (inputs, pcont), bootstrap
     )
-    if axis != 0:
-        returns = returns.permute(dims)
-    return returns
 
 
 class Optimizer:

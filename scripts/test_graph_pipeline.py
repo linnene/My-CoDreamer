@@ -105,6 +105,47 @@ class _NullLogger:
         pass
 
 
+def _old_static_scan_for_lambda_return(fn, inputs, start):
+    """上游原始实现，原样复制，仅用于数值对照。"""
+    last = start
+    indices = range(inputs[0].shape[0])
+    indices = reversed(indices)
+    flag = True
+    for index in indices:
+        inp = lambda x: (_input[x] for _input in inputs)
+        last = fn(last, *inp(index))
+        if flag:
+            outputs = last
+            flag = False
+        else:
+            outputs = torch.cat([outputs, last], dim=-1)
+    outputs = torch.reshape(outputs, [outputs.shape[0], outputs.shape[1], 1])
+    outputs = torch.flip(outputs, [1])
+    outputs = torch.unbind(outputs, dim=0)
+    return outputs
+
+
+def _old_lambda_return(reward, value, pcont, bootstrap, lambda_):
+    """上游 lambda_return 的等价物，返回 (time, batch, 1) —— 展开它的 unbind +
+    torch.stack(target, dim=1)。仅用于数值对照。"""
+    if bootstrap is None:
+        bootstrap = torch.zeros_like(value[-1])
+    next_values = torch.cat([value[1:], bootstrap[None]], 0)
+    inputs = reward + pcont * next_values * (1 - lambda_)
+    returns = _old_static_scan_for_lambda_return(
+        lambda agg, cur0, cur1: cur0 + cur1 * lambda_ * agg, (inputs, pcont), bootstrap
+    )
+    return torch.stack(returns, dim=1)
+
+
+def _raises_notimpl(fn) -> bool:
+    try:
+        fn()
+        return False
+    except NotImplementedError:
+        return True
+
+
 def build_batch(config, spec, num_teams: int, batch_length: int, tmpdir: str) -> tuple[dict, object]:
     """跑一点 rollout，产出图批次 (B, T, N, ·)，并返回 (batch, obs_space)。"""
     envs = [SequentialEstimateGameEnv(spec, seed=1000 + i, graph_obs=True) for i in range(1)]
@@ -272,7 +313,49 @@ def main() -> int:
     # GNN 只该影响“跨 agent”的部分。孤岛 agent 的 det​er 不应因邻居而变。
     # （已由 networks_gnn 的单元测试覆盖，这里不重复。）
 
-    print("\n[6] 预测头里的通信：只有 reward / cont，decoder 必须独立")
+    # ------------------------------------------------------------------
+    print("\n[6] lambda_return 重写后的等价性")
+    # 重写 static_scan_for_lambda_return 是为了去掉 `reshape([shape[0], shape[1], 1])`
+    # 这个两维假设（见 tools.py）。这里证明重写没有改变数值语义：
+    #   ① 二维输入下，新旧逐位相同；
+    #   ② 带 agent 轴的输入下，逐 agent 切开喂给**旧实现**，结果必须与新实现一致。
+    ar = torch.randn(6, 3, 1)          # (time, batch, 1)
+    av = torch.randn(6, 3, 1)
+    ap = torch.full((6, 3, 1), 0.99)
+    old = _old_lambda_return(ar[1:], av[:-1], ap[1:], av[-1], 0.95)
+    new = tools.lambda_return(ar[1:], av[:-1], ap[1:], bootstrap=av[-1],
+                              lambda_=0.95, axis=0)
+    check("lambda_return 形状不变", tuple(new.shape) == tuple(old.shape),
+          f"new={tuple(new.shape)} old={tuple(old.shape)}")
+    check("lambda_return 数值逐位相同（二维输入）",
+          bool(torch.equal(new, old)),
+          f"max|Δ|={float((new - old).abs().max()):.3e}")
+
+    gn = 4
+    nr = torch.randn(6, 3, gn, 1)      # (time, batch, agent, 1)
+    nv = torch.randn(6, 3, gn, 1)
+    npc = torch.full((6, 3, gn, 1), 0.99)
+    new_g = tools.lambda_return(nr[1:], nv[:-1], npc[1:], bootstrap=nv[-1],
+                                lambda_=0.95, axis=0)
+    check("带 agent 轴时形状为 (time,batch,agent,1)",
+          tuple(new_g.shape) == (5, 3, gn, 1), str(tuple(new_g.shape)))
+    check(
+        "逐 agent 切开（喂旧实现）结果一致",
+        all(
+            torch.allclose(
+                new_g[:, :, j],
+                _old_lambda_return(nr[1:, :, j:j + 1], nv[:-1, :, j:j + 1],
+                                   npc[1:, :, j:j + 1], nv[-1, :, j:j + 1], 0.95),
+            )
+            for j in range(gn)
+        ),
+    )
+    check("axis!=0 会明确报错（而不是静默算错）",
+          _raises_notimpl(lambda: tools.lambda_return(ar[1:], av[:-1], ap[1:],
+                                                      bootstrap=av[-1],
+                                                      lambda_=0.95, axis=1)))
+
+    print("\n[7] 预测头里的通信：只有 reward / cont，decoder 必须独立")
     # 为什么不用 loss 判断头有没有接上图：
     # reward 头的输出层用 `outscale: 0.0` 初始化，logits 恒为 0 → 预测分布是均匀的
     # → 损失被钉在最大熵 log(255) = 5.5413 上，单步训练后输出层还没学动，
@@ -352,7 +435,7 @@ def main() -> int:
         np.isclose(float(np.asarray(mets_h["kl"])), float(np.asarray(mets_graph["kl"]))),
     )
 
-    print("\n[7] 结论")
+    print("\n[8] 结论")
     if not FAILURES:
         print("      ✓ 数据管线 (B,T,N,·) 与展平路径等价（相对误差在 float32 机器精度量级）")
         print("      ✓ GNN 已接入 RSSM 的 GRU 咽喉点，开/关确实改变计算结果")
