@@ -124,6 +124,17 @@ def heldout_batch(config, agent, repeats: int = 20, teams: int = 40):
         return [next(dataset) for _ in range(repeats)]
 
 
+def _mean(dist):
+    """取分布的均值。
+
+    注意：不同分布类的接口不一样 —— 有的把 `mean` 定义成**属性**（一个 Tensor），
+    有的定义成**方法**。直接 `.mean()` 会在前者上报 `'Tensor' object is not callable`。
+    奖励头（symlog_disc）与继续头（binary）恰好分属两类。
+    """
+    m = dist.mean
+    return m() if callable(m) else m
+
+
 @torch.no_grad()
 def openloop(wm, data, config, horizons, max_horizon: int):
     """返回 {horizon: {reward_mae, cont_mae, kl, state_mse, n}}。"""
@@ -150,8 +161,8 @@ def openloop(wm, data, config, horizons, max_horizon: int):
         state = wm.dynamics.img_step(state, obs["action"][:, t0 + k - 1], sample=False, graph=g0)
         feat = wm.dynamics.get_feat(state)
 
-        rew_pred = wm.heads["reward"](feat, graph=g0).mean()
-        cont_pred = wm.heads["cont"](feat, graph=g0).mean()
+        rew_pred = _mean(wm.heads["reward"](feat, graph=g0))
+        cont_pred = _mean(wm.heads["cont"](feat, graph=g0))
         rew_true = obs["reward"][:, t0 + k]
         cont_true = obs["cont"][:, t0 + k]
 
@@ -160,7 +171,7 @@ def openloop(wm, data, config, horizons, max_horizon: int):
         _, kl_value, _, _ = wm.dynamics.kl_loss(post_k, state, 1.0, 0.5, 1.0)
 
         # 状态漂移的另一面：用 prior 特征重建观测
-        recon = wm.heads["decoder"](feat)["state"].mean()
+        recon = _mean(wm.heads["decoder"](feat)["state"])
         state_mse = ((recon - obs["state"][:, t0 + k]) ** 2).mean()
 
         if k in horizons:
