@@ -195,6 +195,9 @@ def main() -> int:
     ap.add_argument("--episodes", type=int, default=200, help="agent 局数（同 eval_episode_num）")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--out", default=None, help="箱线图输出路径")
+    ap.add_argument(
+        "--out-json", default=None, help="逐局分数的 JSON，供 plot_phase2.py 用"
+    )
     args = ap.parse_args()
 
     checkpoints = parse_checkpoints(args.checkpoint)
@@ -265,6 +268,30 @@ def main() -> int:
 
     if args.out:
         plot(results, pathlib.Path(args.out).expanduser())
+    if args.out_json:
+        import json
+
+        p = pathlib.Path(args.out_json).expanduser()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps(
+                {
+                    r["name"]: {
+                        "path": r["path"],
+                        "scores": r["scores"].tolist(),
+                        "mean": r["mean"],
+                        "median": r["median"],
+                        "q1": r["q1"],
+                        "q3": r["q3"],
+                        "ci": r["ci"],
+                    }
+                    for r in results
+                },
+                ensure_ascii=False,
+                indent=1,
+            )
+        )
+        print(f"  分数已保存: {p}")
     return 0
 
 
