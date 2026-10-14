@@ -205,22 +205,36 @@ def main() -> int:
         ),
     )
 
-    print("\n[3] 真实模型：折平路径 vs 图路径，损失必须逐位相同（gnn_layers=0）")
+    print("\n[3] 真实模型：折平路径 vs 图路径，损失必须一致（gnn_layers=0）")
     mets_graph, n_graph = train_once(config, obs_space, batch, n, args.seed, gnn_layers=0)
     mets_flat, _ = train_once(config, obs_space, folded, 1, args.seed, gnn_layers=0)
 
+    # 容差说明（为什么不再是 0）：
+    #
+    # 图路径算的是 (B,T,N,·)，展平路径算 (B*N,T,·)。**同一批数，内存顺序不同**，
+    # 于是 torch.mean / logsumexp 这类归约的累加顺序不同，float32 下结果会差
+    # 最后几位。float32 的机器 epsilon 是 1.2e-07，实测相对偏差恰在这个量级。
+    #
+    # 这是**原理上不可避免**的，不是 bug：任何"同样输入、不同张量形状"的两次归约
+    # 都不保证逐位相同。判断标准改成相对误差：真错了（轴接反、切错 agent）会差
+    # 好几个数量级，而不是 1e-07。
+    #
+    # 而 [2] 节对 fold_agent_axis 本身仍然要求**严格为 0** —— 那一步是纯重排，
+    # 不涉及任何归约，可以且应该逐位相同。
+    RTOL = 1e-5   # 比噪声地板高约 100 倍，但远小于任何真实错误的幅度
     keys = ["model_loss", "state_loss", "reward_loss", "cont_loss", "kl", "dyn_loss", "rep_loss"]
-    worst = 0.0
+    worst_rel = 0.0
     for key in keys:
         if key not in mets_graph or key not in mets_flat:
             check(f"{key} 存在", False, f"graph={key in mets_graph} flat={key in mets_flat}")
             continue
         a, bb = float(np.asarray(mets_graph[key])), float(np.asarray(mets_flat[key]))
-        worst = max(worst, abs(a - bb))
-        check(f"{key} 一致", a == bb, f"graph={a!r} flat={bb!r} diff={abs(a-bb):.3e}")
+        rel = abs(a - bb) / max(abs(a), abs(bb), 1e-12)
+        worst_rel = max(worst_rel, rel)
+        check(f"{key} 一致", rel < RTOL, f"graph={a!r} flat={bb!r} rel={rel:.2e}")
 
     print("\n[4] 结论")
-    check("所有损失逐位相同（阈值 0）", worst == 0.0, f"最大偏差 {worst:.3e}")
+    check(f"所有损失相对偏差 < {RTOL:.0e}", worst_rel < RTOL, f"最大相对偏差 {worst_rel:.2e}")
 
     # ------------------------------------------------------------------
     print("\n[5] GNN 确实接上了（本节是步骤 3 的核心验收）")
