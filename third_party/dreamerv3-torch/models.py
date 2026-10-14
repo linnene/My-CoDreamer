@@ -130,6 +130,10 @@ class WorldModel(nn.Module):
             outscale=config.reward_head["outscale"],
             device=config.device,
             name="Reward",
+            # [CoDreamer] 论文 Table 2：Reward & Cont GNN Layers = 1
+            gnn_layers=config.gnn_head_layers,
+            gnn_edge_dim=edge_dim,
+            gnn_heads=config.gnn_heads,
         )
         self.heads["cont"] = networks.MLP(
             feat_size,
@@ -142,7 +146,14 @@ class WorldModel(nn.Module):
             outscale=config.cont_head["outscale"],
             device=config.device,
             name="Cont",
+            gnn_layers=config.gnn_head_layers,
+            gnn_edge_dim=edge_dim,
+            gnn_heads=config.gnn_heads,
         )
+        # [CoDreamer] 论文："only the reward and terminal state prediction heads use
+        # communication, **while the decoder head remains independent**"。
+        # decoder 重建的是自己的观测，本来就是局部信息，所以不插 GNN。
+        self._comm_heads = ("reward", "cont")
         for name in config.grad_heads:
             assert name in self.heads, name
         self._model_opt = tools.Optimizer(
@@ -200,7 +211,12 @@ class WorldModel(nn.Module):
                     grad_head = name in self._config.grad_heads
                     feat = self.dynamics.get_feat(post)
                     feat = feat if grad_head else feat.detach()
-                    pred = head(feat)
+                    # [CoDreamer] 只有 reward / cont 头接收图（论文明确 decoder 独立）。
+                    # graph 为 None（未开图）或无 GNN 层时这里是恒等。
+                    if name in self._comm_heads:
+                        pred = head(feat, graph=graph)
+                    else:
+                        pred = head(feat)
                     if type(pred) is dict:
                         preds.update(pred)
                     else:

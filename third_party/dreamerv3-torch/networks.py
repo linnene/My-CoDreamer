@@ -694,6 +694,9 @@ class MLP(nn.Module):
         symlog_inputs=False,
         device="cuda",
         name="NoName",
+        gnn_layers=0,
+        gnn_edge_dim=0,
+        gnn_heads=1,
     ):
         super(MLP, self).__init__()
         self._shape = (shape,) if isinstance(shape, int) else shape
@@ -724,6 +727,26 @@ class MLP(nn.Module):
                 inp_dim = units
         self.layers.apply(tools.weight_init)
 
+        # [CoDreamer] 预测头里的通信层。
+        #
+        # 论文 Table 2："Reward & Cont GNN Layers 1"，且
+        #   "only the reward and terminal state prediction heads use communication,
+        #    while **the decoder head remains independent**"
+        # 所以只有 reward / cont 两个头会拿到非 0 的 gnn_layers；decoder 保持 0。
+        #
+        # 位置：作用在 **self.layers 的隐层输出**（units 维，我们这里是 512）上，
+        # 而不是头的输入（feat 是 1536 维）。理由：GATv2 一层的参数量是 5·d²，
+        # 在 1536 维上是 1180 万，而论文整个向量环境世界模型才 16M —— 不可能。
+        # 在 512 维上是 131 万，量级合理。
+        #
+        # 0 层时 GraphAggregator 是严格恒等，不插 GNN 的头/变体完全不受影响。
+        self._gnn = networks_gnn.GraphAggregator(
+            units,
+            layers=gnn_layers,
+            edge_dim=gnn_edge_dim,
+            heads=gnn_heads,
+        )
+
         if isinstance(self._shape, dict):
             self.mean_layer = nn.ModuleDict()
             for name, shape in self._shape.items():
@@ -743,11 +766,15 @@ class MLP(nn.Module):
                 self.std_layer = nn.Linear(units, np.prod(self._shape))
                 self.std_layer.apply(tools.uniform_weight_init(outscale))
 
-    def forward(self, features, dtype=None):
+    def forward(self, features, dtype=None, graph=None):
         x = features
         if self._symlog_inputs:
             x = tools.symlog(x)
         out = self.layers(x)
+        # [CoDreamer] 通信：在隐层上做邻域聚合，再把结果交给输出层。
+        # graph 为 None 或层数为 0 时这一步是恒等（见 GraphAggregator）。
+        if graph is not None:
+            out = self._gnn(out, graph[0], graph[1])
         # Used for encoder output
         if self._shape is None:
             return out

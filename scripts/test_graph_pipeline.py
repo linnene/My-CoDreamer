@@ -127,13 +127,15 @@ def build_batch(config, spec, num_teams: int, batch_length: int, tmpdir: str) ->
     return batch, envs[0].observation_space
 
 
-def train_once(config, obs_space, batch, num_agents_override: int, seed: int, gnn_layers: int = 0) -> dict:
+def train_once(config, obs_space, batch, num_agents_override: int, seed: int,
+               gnn_layers: int = 0, gnn_head_layers: int = 0) -> dict:
     """在一个全新模型上跑一次 _train，返回 (损失指标, 参数量)。"""
     import copy
 
     cfg = copy.deepcopy(config)
     cfg.num_agents = num_agents_override
     cfg.gnn_layers = gnn_layers
+    cfg.gnn_head_layers = gnn_head_layers
     cfg.device = "cpu"
     cfg.precision = 32          # 关掉 amp，保证两次比较逐位一致
     cfg.compile = False
@@ -261,10 +263,36 @@ def main() -> int:
     # GNN 只该影响“跨 agent”的部分。孤岛 agent 的 det​er 不应因邻居而变。
     # （已由 networks_gnn 的单元测试覆盖，这里不重复。）
 
-    print("\n[6] 结论")
+    print("\n[6] 预测头里的通信：只有 reward / cont，decoder 必须独立")
+    mets_h, n_h = train_once(
+        config, obs_space, batch, n, args.seed, gnn_layers=0, gnn_head_layers=1
+    )
+    print(f"       gnn_head_layers=0 参数量 {n_graph:,}")
+    print(f"       gnn_head_layers=1 参数量 {n_h:,}  （+{n_h - n_graph:,}，两个头）")
+    check("开了头 GNN 后参数变多", n_h > n_graph, f"+{n_h - n_graph:,}")
+    check("头 GNN 无 NaN", all(
+        np.isfinite(np.asarray(mets_h[k])).all()
+        for k in ["model_loss", "state_loss", "reward_loss", "cont_loss"]
+    ))
+    # reward / cont 接了图 → 它们的损失必须变
+    for key in ["reward_loss", "cont_loss"]:
+        check(f"{key} 变化（该头接了通信）",
+              not np.isclose(float(np.asarray(mets_h[key])),
+                             float(np.asarray(mets_graph[key]))))
+    # ★ 关键：论文要求 decoder 保持独立，所以 state_loss **必须逐位不变** ★
+    check("state_loss 完全不变（decoder 独立，论文明确要求）",
+          float(np.asarray(mets_h["state_loss"])) == float(np.asarray(mets_graph["state_loss"])),
+          f"head={float(np.asarray(mets_h['state_loss']))!r} "
+          f"base={float(np.asarray(mets_graph['state_loss']))!r}")
+    # 本轮 RSSM 的 GNN 是关的 → KL 不应受影响
+    check("kl 不变（本轮 RSSM GNN 关闭）",
+          np.isclose(float(np.asarray(mets_h["kl"])), float(np.asarray(mets_graph["kl"]))))
+
+    print("\n[7] 结论")
     if not FAILURES:
         print("      ✓ 数据管线 (B,T,N,·) 与展平路径等价（相对误差在 float32 机器精度量级）")
         print("      ✓ GNN 已接入 RSSM 的 GRU 咽喉点，开/关确实改变计算结果")
+        print("      ✓ reward / cont 头接了通信，而 decoder 逐位不受影响")
 
     print("=" * 74)
     if FAILURES:
