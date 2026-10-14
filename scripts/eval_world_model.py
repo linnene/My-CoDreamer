@@ -194,11 +194,12 @@ def plot(results: dict, out: pathlib.Path, groups: list[str] | None = None) -> N
 
     out.parent.mkdir(parents=True, exist_ok=True)
     metrics = [
-        ("cont_mae", "continuation 预测误差（MAE）"),
-        ("kl", "开环隐状态漂移（prior vs posterior 的 KL）"),
+        ("cont_mae", "continuation prediction error (MAE)"),
+        ("kl", "open-loop latent drift (KL prior vs posterior)"),
     ]
     fig, axes = plt.subplots(1, len(metrics), figsize=(6.0 * len(metrics), 4.4))
     colors = {"IDreamer": "#3b6ea5", "CoDreamer": "#c1554b"}
+    # 无 CJK 字体，一律英文标签（否则渲染成方块）
     for ax, (key, title) in zip(axes, metrics):
         for name, rows in results.items():
             base = name.split("-")[0]
