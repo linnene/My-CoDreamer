@@ -155,18 +155,20 @@ def build_run(tmp: pathlib.Path, *, variant: str, pretrain: int, seed: int = 0):
     cfg.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
 
     # 用随机策略灌 replay
+    #
+    # 注意第 4 个参数是**存盘目录**，必须就是随后 load_episodes 读的那个。
+    # 两边用不同的目录会得到"replay 里有 episode，但找不到完整队伍"。
     cache: dict = {}
-    with tempfile.TemporaryDirectory() as sim_tmp:
-        tools_marl.simulate_marl(
-            _RandomPolicy(cfg.num_actions, cfg.num_agents, seed=seed),
-            [env],
-            cache,
-            sim_tmp,
-            tools.Logger(pathlib.Path(cfg.logdir), 0),
-            is_eval=False,
-            limit=cfg.dataset_size,
-            episodes=cfg.prefill * cfg.num_agents,
-        )
+    tools_marl.simulate_marl(
+        _RandomPolicy(cfg.num_actions, cfg.num_agents, seed=seed),
+        [env],
+        cache,
+        cfg.traindir,
+        tools.Logger(pathlib.Path(cfg.logdir), 0),
+        is_eval=False,
+        limit=cfg.dataset_size,
+        episodes=cfg.prefill * cfg.num_agents,
+    )
 
     logger = tools.Logger(pathlib.Path(cfg.logdir), 0)
     train_eps = tools.load_episodes(cfg.traindir, limit=cfg.dataset_size)
@@ -259,9 +261,6 @@ def section_execution_graph(tmp: pathlib.Path) -> None:
             adj1[:, 0, 1] = 1.0 - adj1[:, 0, 1]
             obs0 = dict(obs, adjacency=adj0)
             obs1 = dict(obs, adjacency=adj1)
-            edge0 = np.asarray(obs["edge_features"], dtype=np.float32).copy()
-            if edge0.ndim == 3:                       # (batch, N, F) 无 N 轴时
-                pass
             changed = float(np.abs(adj0 - adj1).max())
 
             def run(o):
