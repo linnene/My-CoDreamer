@@ -303,19 +303,25 @@ def main() -> int:
     )
 
     # --- 行为：头的输出确实随图变化
+    def _mean(dist):
+        # DiscDist 的 mean 是方法，Bernoulli 的是属性 —— 统一取一下
+        v = getattr(dist, "mean")
+        return v() if callable(v) else v
+
     feat = torch.randn(b, t, n, feat_size)
-    adj_b = batch["adjacency"].clone()
+    adj_a = torch.as_tensor(batch["adjacency"])
+    edge_a = torch.as_tensor(batch["edge_features"])
+    adj_b = adj_a.clone()
     adj_b[..., 0, 2] = 1.0
     adj_b[..., 2, 0] = 1.0          # 多连一条边：0-2 相连
-    mean_a = batch["edge_features"].clone()
-    mean_b = batch["edge_features"].clone()
-    mean_b[..., 0, 2, :] = 0.5      # 并改一下那条边的边特征
-    mean_b[..., 2, 0, :] = 0.5
+    edge_b = edge_a.clone()
+    edge_b[..., 0, 2, :] = 0.5      # 并改一下那条边的边特征
+    edge_b[..., 2, 0, :] = 0.5
 
     for name in ["reward", "cont"]:
         head = wm.heads[name]
-        out_a = head(feat, graph=(batch["adjacency"], mean_a)).mean
-        out_b = head(feat, graph=(adj_b, mean_b)).mean
+        out_a = _mean(head(feat, graph=(adj_a, edge_a)))
+        out_b = _mean(head(feat, graph=(adj_b, edge_b)))
         check(
             f"{name} 头对图有响应（改边/改边特征会改变输出）",
             not torch.allclose(out_a, out_b),
