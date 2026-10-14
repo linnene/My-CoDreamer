@@ -149,6 +149,10 @@ def build_run(tmp: pathlib.Path, *, variant: str, pretrain: int, seed: int = 0):
 
     tools.set_seed_everywhere(seed)
     env = dreamer_mod.make_env(cfg, "train", 0)
+    # main() 在拿到环境后才回填这两个键，测试必须复刻，否则 Dreamer 拿不到动作数
+    cfg.num_agents = getattr(env, "num_agents", 1)
+    acts = env.action_space
+    cfg.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
 
     # 用随机策略灌 replay
     cache: dict = {}
