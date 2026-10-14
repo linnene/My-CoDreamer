@@ -109,14 +109,13 @@ _AGENT_ID_SEP = "--"
 def parse_agent_episode_id(name: str) -> tuple[str, int]:
     """从 episode 的键还原 (team_id, agent_index)。
 
-    `tools.load_episodes` 用**文件名去扩展名**作键，而 `save_episodes` 的命名是
-    `{episode_id}-{长度}.npz`。把 episode_id = `{team_id}--a{k}` 代进去，完整的键是：
+    **同一个 episode 在内存里和磁盘上的键不一样**，两种都要接受：
 
-        {team_id}--a{k}-{长度}
+        内存（add_to_cache）：  {team_id}--a{k}
+        磁盘（load_episodes）：  {team_id}--a{k}-{长度}      ← save_episodes 命名 {id}-{len}.npz
 
-    注意两个分隔符**不一样**：team_id 与 agent 片段之间是双横线（我们自己加的），
-    而 agent 片段与长度之间是单横线（save_episodes 加的）。所以先按双横线切成
-    两段，再把后半段按最后一个单横线切开。
+    所以先按双横线切成两段，再把后半段按**最后一个单横线**切开；若后半段里
+    没有单横线，那整段就是 agent 标记。
 
     旧格式（步骤 1 写的，team_id-a{k}-{len}）无法无歧义地拆分，会直接报
     ValueError —— 那些数据本来也没有图结构，被 team_groups 跳过即可。
@@ -125,8 +124,11 @@ def parse_agent_episode_id(name: str) -> tuple[str, int]:
     if len(parts) != 2:
         raise ValueError(f"not an agent-episode key: {name!r}")
     team_id, tail = parts
-    agent_tag, sep, _length = tail.rpartition("-")
-    if not sep or not agent_tag.startswith("a"):
+    agent_tag, _sep, _length = tail.rpartition("-")
+    if not agent_tag:
+        # 没有长度段：内存里的键
+        agent_tag = tail
+    if not agent_tag.startswith("a"):
         raise ValueError(f"not an agent-episode key: {name!r}")
     try:
         agent_index = int(agent_tag[1:])
@@ -151,15 +153,23 @@ def team_groups(episodes: dict, num_agents: int | None = None) -> dict:
     代价 = 每次最多丢 num_agents-1 个 agent episode。
     """
     buckets: dict[str, dict[int, str]] = {}
+    dup: set[str] = set()
     for key in episodes:
         try:
             team_id, a = parse_agent_episode_id(key)
         except ValueError:
             continue
-        buckets.setdefault(team_id, {})[a] = key
+        bucket = buckets.setdefault(team_id, {})
+        if a in bucket:
+            # 同一队同一个 agent 出现两次（例如从 checkpoint 续训时，同一局既有
+            # 磁盘键 {id}-{len} 又有内存键 {id}）。哪条更新无从判断，整队丢弃。
+            dup.add(team_id)
+        bucket[a] = key
 
     out = {}
     for team_id, by_agent in buckets.items():
+        if team_id in dup:
+            continue
         n = num_agents if num_agents is not None else len(by_agent)
         if len(by_agent) != n:
             continue
@@ -584,6 +594,15 @@ def _self_test() -> None:
               _raises(lambda: parse_agent_episode_id("garbage")))
         check("缺 agent 段报 ValueError",
               _raises(lambda: parse_agent_episode_id("20260101T000000-deadbeef--6")))
+        # 两种键形式都要认：内存里的没有长度后缀，磁盘上的有
+        check("解析磁盘键 {team}--a2-6",
+              parse_agent_episode_id("T--a2-6") == ("T", 2))
+        check("解析内存键 {team}--a2",
+              parse_agent_episode_id("T--a2") == ("T", 2))
+        check("两种形式归到同一队",
+              team_groups({"T--a0": 1, "T--a1-6": 1}, 2) == {"T": ["T--a0", "T--a1-6"]})
+        check("同一 agent 重复出现的队伍被丢弃",
+              team_groups({"T--a0": 1, "T--a0-6": 1, "T--a1": 1}, 2) == {})
 
         # --- 组队：完整队伍才保留
         eps = {}
