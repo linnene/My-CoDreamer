@@ -134,8 +134,11 @@ class GATv2Layer(nn.Module):
         self._norm = nn.LayerNorm(out_dim, eps=1e-03) if norm else nn.Identity()
         self._act = getattr(torch.nn, act)()
         self.apply(tools.weight_init)
-        # 注意力向量初始化成小常数，避免一开始 softmax 就饱和
-        nn.init.zeros_(self._att)
+        # 注意力向量必须**非零**初始化。若全零，则所有 logits = 0，softmax 退化成
+        # 对邻居做均匀平均 —— GATv2 的核心机制（注意力依赖节点与边特征）在初始化时
+        # 完全失效，边特征也拿不到任何梯度。（曾被自检的"边特征影响输出"一条抓到。）
+        # 取小标准差正态：既有非零梯度，又不会一上来就让 softmax 饱和。
+        nn.init.normal_(self._att, mean=0.0, std=0.1)
 
     def forward(self, node, adjacency, edge=None):
         *lead, n, _ = node.shape
@@ -296,11 +299,18 @@ def _self_test() -> None:
     spread = o3.std(dim=2).mean().item()
     check("3 层后节点间仍有区分度（防过平滑）", spread > 1e-3, f"std={spread:.3e}")
 
-    # --- 边特征确实起作用
+    # --- 边特征确实起作用（若注意力向量初始化为 0，这条会挂）
     agg_e = GraphAggregator(F, layers=1, edge_dim=Fe)
     o_e1 = agg_e(node, A, E)
-    o_e2 = agg_e(node, A, E * 0 + 1.0)
-    check("边特征影响输出", (o_e1 - o_e2).abs().max().item() > 1e-6)
+    o_e2 = agg_e(node, A, torch.ones_like(E))
+    d_e = (o_e1 - o_e2).abs().max().item()
+    check("边特征影响输出", d_e > 1e-6, f"Δ={d_e:.3e}")
+    # 并且注意力分布不是均匀的（均匀 = GATv2 机制失效）
+    alpha_ok = True
+    for m in agg_e.modules():
+        if isinstance(m, GATv2Layer):
+            alpha_ok = alpha_ok and float(m._att.detach().abs().max()) > 0
+    check("注意力向量非零（否则退化为均匀平均）", alpha_ok)
 
     # --- 无自环选项
     layer_no_loop = GATv2Layer(F, F, edge_dim=Fe, self_loops=False)
