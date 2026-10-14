@@ -112,23 +112,45 @@ class Dreamer(nn.Module):
         return policy_output, state
 
     def _policy(self, obs, state, training):
+        # [CoDreamer] ★ 执行路径的 agent 轴 ★
+        #
+        # 训练时数据是 (B, T, N, ·)，agent 轴显式存在；但 simulate_marl 把每个队伍
+        # 铺平成 (n_teams*N, ·) 之后才交给策略，agent 轴就**没有了**。
+        # GNN 必须在同一时刻对 N 个 agent 做邻域聚合，没有这个轴，它会把 batch 维
+        # 当成邻居维 —— 实测报错是 `agg.reshape(*node.shape[:-1], ...)` 拿到 [4]。
+        #
+        # 所以这里把布局还原成 (n_teams, N, ·)，算完再铺平回去。这同时解决了两个
+        # 形状问题：图是 (batch, N)（一堆行）而不是 (batch, N, N)，隐状态也没有
+        # agent 轴。两个问题同源：**执行路径缺的是 agent 轴**。
+        #
+        # n_agents == 1 时不动任何形状 —— 单智能体路径必须与上游逐位一致。
+        n_agents = max(1, int(getattr(self._config, "num_agents", 1)))
+        reshape = n_agents > 1
+
+        def add_agent_axis(x):
+            return x.reshape((-1, n_agents) + tuple(x.shape[1:]))
+
+        def drop_agent_axis(x):
+            return x.reshape((-1,) + tuple(x.shape[2:]))
+
         if state is None:
             latent = action = None
         else:
             latent, action = state
+            if reshape:
+                latent = {k: add_agent_axis(v) for k, v in latent.items()}
+                action = add_agent_axis(action)
         obs = self._wm.preprocess(obs)
+        if reshape:
+            obs = {k: add_agent_axis(v) for k, v in obs.items()}
         embed = self._wm.encoder(obs)
         # [CoDreamer] ★ 执行路径也必须拿到图 ★
         #
         # 曾经只有训练路径（_train -> _imagine）传图，_policy 这里一个字都没提。
         # 后果是：收集数据用的动作来自一个看不见图的 actor，而世界模型是带着图训练
         # 的；部署评测也评的是看不见图的策略。CoDreamer 于是从未在真实执行中使用通信。
-        #
-        # 用 execution_graph 而不是 graph_from_data：执行时的观测被 simulate_marl
-        # 铺平过，图形状是 (batch, N)（一堆行），必须显式还原成 (batch, N, N)。
-        # 直接喂 graph_from_data 的输出会让 GNN 拿到错误形状（这一点差点又漏掉一次）。
         # 由 scripts/test_training_loop.py 盯死。
-        graph = models.execution_graph(obs, self._config.num_agents, self._config.device)
+        graph = models.execution_graph(obs, n_agents, self._config.device)
         latent, _ = self._wm.dynamics.obs_step(
             latent, action, embed, obs["is_first"], graph=graph
         )
@@ -151,6 +173,11 @@ class Dreamer(nn.Module):
             actor = self._task_behavior.actor(feat, graph=graph)
             action = actor.sample()
         logprob = actor.log_prob(action)
+        if reshape:
+            # state 是跨步传递的，必须回到与传入时相同的铺平布局
+            latent = {k: drop_agent_axis(v) for k, v in latent.items()}
+            action = drop_agent_axis(action)
+            logprob = drop_agent_axis(logprob)
         latent = {k: v.detach() for k, v in latent.items()}
         action = action.detach()
         if self._config.actor["dist"] == "onehot_gumble":

@@ -264,30 +264,43 @@ def section_execution_graph(tmp: pathlib.Path) -> None:
 
             # ★ 先把形状钉死 ★
             # 环境的观测里 adjacency 是**整张** (N, N)（同一份给所有 agent），
-            # simulate_marl 铺平后对 1 支队仍是 (N, N)，读作 (batch=N, N)。
-            # GNN 需要的是 (batch, N, N) —— 这个还原就靠 execution_graph。
+            # simulate_marl 铺平后是 (n_teams*N, N) —— 每行是某队矩阵的一行。
+            # GNN 要的是 agent 轴显式存在的 (n_teams, N, N)。
             # 这里如果形状错了，下面"改图不影响"的断言会因为错误的原因通过。
+            n_teams = batch // n
             check(
                 "铺平后的 adjacency 是 (batch, N)（一堆行）",
                 obs["adjacency"].ndim == 2 and obs["adjacency"].shape[1] == n,
                 f"得到 {obs['adjacency'].shape}，期望 ({batch}, {n})",
             )
-            g = models.execution_graph(obs, n, "cpu")
+
+            # 补 agent 轴 —— 这正是 Dreamer._policy 里 add_agent_axis 做的事
+            unflat = dict(obs)
+            unflat["adjacency"] = obs["adjacency"].reshape(n_teams, n, n)
+            unflat["edge_features"] = obs["edge_features"].reshape(
+                n_teams, n, n, obs["edge_features"].shape[-1]
+            )
+            g = models.execution_graph(unflat, n, "cpu")
             check(
-                "execution_graph 还原出 (batch, N, N)",
-                g is not None and tuple(g[0].shape) == (batch, n, n),
+                "补上 agent 轴后得 (n_teams, N, N)",
+                g is not None and tuple(g[0].shape) == (n_teams, n, n),
                 f"得到 {None if g is None else tuple(g[0].shape)}",
             )
-            # 每支队伍的那一块必须等于它自己的邻接矩阵。
-            # 输出是 (batch, N, N) = (n_teams*N, N, N)，先读作 (n_teams, N, N, N)，
-            # 再取队内任意一个 agent（它们必须完全相同）。
-            n_teams = batch // n
+            # 每支队伍那一块必须等于它自己的邻接矩阵
             expect = obs["adjacency"].reshape(n_teams, n, n)
-            got = g[0].numpy().reshape(n_teams, n, n, n)
-            ok = all(np.array_equal(expect[t], got[t, k]) for t in range(n_teams) for k in range(n))
-            check("同一队的 N 个 agent 拿到同一张完整矩阵（且等于原矩阵）", ok)
+            check(
+                "每支队伍的矩阵等于原矩阵",
+                np.array_equal(expect, g[0].numpy()),
+            )
+            # ★ 不带 agent 轴时必须报错 ★
+            # 这个形状已经错过三次，且三次都是 GNN 内部报错而不是调用点报错。
+            try:
+                models.execution_graph(obs, n, "cpu")
+                check("缺 agent 轴时 execution_graph 会报错（而不是传给 GNN）", False)
+            except ValueError:
+                check("缺 agent 轴时 execution_graph 会报错（而不是传给 GNN）", True)
 
-            # 翻一条有向边。adjacency 是 2 维 (batch, N)，批里每个 agent 各占一行。
+            # 翻一条有向边。铺平布局下每个 agent 各占一行。
             adj0 = np.asarray(obs["adjacency"], dtype=np.float32).copy()
             adj1 = adj0.copy()
             adj1[0, 1] = 1.0 - adj1[0, 1]

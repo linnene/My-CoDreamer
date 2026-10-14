@@ -79,43 +79,51 @@ def graph_from_data(data, device=None, dtype=torch.float32):
 #    与 `acts.reshape(n_teams, n_agents, ·)` 用的就是同一个顺序，所以是真实约束。
 #    下面用 assert 把它变成会报错的东西，而不是注释里的默契。
 def execution_graph(obs, num_agents, device=None, dtype=torch.float32):
-    """执行路径（单步、无时间维）的 (adjacency, edge_features)，形状 (B, N, N)。
+    """执行路径的 (adjacency, edge_features)，要求形状 (n_teams, N, N)。
 
-    训练路径用 `graph_from_data` + `flatten_graph`（数据已经是 (B, T, N, N)）；
-    执行路径的观测被 simulate_marl 铺平过，必须走这个不同的入口。
+    ⚠️ **调用前必须已经补上 agent 轴**（见 Dreamer._policy 里的 add_agent_axis）。
+    这个函数不是多余的包装：这个形状已经错过三次了 ——
+        ① 忘了传图；
+        ② 传了但没把 (batch, N) 还原成矩阵；
+        ③ 还原了矩阵但 batch 里没有 agent 轴。
+    三次都表现为 GNN 内部的广播 / reshape 报错，而不是在调用点报错。
+    所以这里把"agent 轴存在"变成显式断言。
+
+    环境给每个 agent 的是**整张** (N, N) 邻接矩阵；simulate_marl 把每队铺平成
+    (n_teams*N, ·) 后又铺回来，于是队伍 t 的 N 行恰好构成它自己的矩阵。
     """
     if "adjacency" not in obs:
         return None
     n = int(num_agents)
+
     def as_tensor(v):
         if torch.is_tensor(v):
             return v.to(device=device, dtype=dtype) if device is not None else v
         return torch.as_tensor(v, dtype=dtype, device=device)
 
     adjacency = as_tensor(obs["adjacency"])
-    if adjacency.dim() != 2:
-        raise ValueError(
-            f"执行路径的 adjacency 应该是 (n_teams*N, N) = {(adjacency.shape[0], n)}，"
-            f"得到 {tuple(adjacency.shape)}。环境改了图形状？"
-        )
-    batch = adjacency.shape[0]
-    if batch % n != 0:
-        raise ValueError(
-            f"batch={batch} 不是 agent 数 {n} 的整数倍 —— 无法还原队伍的邻接矩阵。"
-        )
-    n_teams = batch // n
-    # (n_teams, N, N) -> (n_teams*N, N, N)，每队的矩阵广播给它自己的 N 个 agent
-    adjacency = adjacency.reshape(n_teams, n, n).repeat_interleave(n, dim=0)
+    if n > 1:
+        if adjacency.dim() != 3 or adjacency.shape[1] != n or adjacency.shape[2] != n:
+            raise ValueError(
+                f"执行路径的 adjacency 应该是 (n_teams, N={n}, N={n})，"
+                f"得到 {tuple(adjacency.shape)}。"
+                "是否忘了在 _policy 里补 agent 轴？"
+            )
+    else:
+        if adjacency.dim() != 2:
+            raise ValueError(
+                f"单智能体下 adjacency 应该是 (n_teams, N)，得到 {tuple(adjacency.shape)}"
+            )
 
     edge = None
     if "edge_features" in obs:
         edge = as_tensor(obs["edge_features"])
-        if edge.dim() != 3 or edge.shape[:2] != (batch, n):
+        want = (n, n) if n > 1 else (n,)
+        if tuple(edge.shape[1:3]) != want or edge.shape[0] != adjacency.shape[0]:
             raise ValueError(
-                f"执行路径的 edge_features 应该是 (n_teams*N, N, F)，"
+                f"执行路径的 edge_features 应该是 (n_teams, {n}, {n}, F)，"
                 f"得到 {tuple(edge.shape)}"
             )
-        edge = edge.reshape(n_teams, n, n, edge.shape[-1]).repeat_interleave(n, dim=0)
     return adjacency, edge
 
 
