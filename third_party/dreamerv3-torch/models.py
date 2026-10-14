@@ -417,7 +417,13 @@ class ImagBehavior(nn.Module):
         with tools.RequiresGrad(self.value):
             with torch.cuda.amp.autocast(self._use_amp):
                 value = self.value(value_input[:-1].detach())
-                target = torch.stack(target, dim=1)
+                # [CoDreamer] 上游这里还会再 `target = torch.stack(target, dim=1)`：
+                # 旧的 lambda_return 返回元组，而 `_compute_actor_loss` 里的 stack
+                # 是**局部变量**，所以外层这个 target 仍是元组，需要再展开一次。
+                # 现在 lambda_return 直接返回张量 (time, *batch, 1)，两处 stack 都去掉。
+                # （漏掉这一处会把 ImagBehavior 直接跑崩；
+                #  test_graph_pipeline 只跑 WorldModel._train，盖不到这条路径，
+                #  是靠真实训练发现的。）
                 # (time, batch, 1), (time, batch, 1) -> (time, batch)
                 value_loss = -value.log_prob(target.detach())
                 slow_target = self._slow_value(value_input[:-1].detach())
