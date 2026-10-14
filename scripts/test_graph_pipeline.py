@@ -263,7 +263,7 @@ def main() -> int:
 
     print("\n[6] 结论")
     if not FAILURES:
-        print("      ✓ 数据管线 (B,T,N,·) 与展平路径逐位等价（0 层时）")
+        print("      ✓ 数据管线 (B,T,N,·) 与展平路径等价（相对误差在 float32 机器精度量级）")
         print("      ✓ GNN 已接入 RSSM 的 GRU 咽喉点，开/关确实改变计算结果")
 
     print("=" * 74)
