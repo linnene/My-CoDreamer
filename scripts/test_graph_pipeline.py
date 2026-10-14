@@ -274,29 +274,69 @@ def main() -> int:
     # （已由 networks_gnn 的单元测试覆盖，这里不重复。）
 
     print("\n[6] 预测头里的通信：只有 reward / cont，decoder 必须独立")
-    mets_h, n_h = train_once(
-        config, obs_space, batch, n, args.seed, gnn_layers=0, gnn_head_layers=1
-    )
+    # 为什么不用 loss 判断头有没有接上图：
+    # reward 头的输出层用 `outscale: 0.0` 初始化，logits 恒为 0 → 预测分布是均匀的
+    # → 损失被钉在最大熵 log(255) = 5.5413 上，单步训练后输出层还没学动，
+    # **换任何图都不动**。那是初始化的退化，不是接线错误。
+    # 所以这里直接比对**头的输出张量**，与 loss 的绝对值无关。
+    cfg = copy.deepcopy(config)
+    cfg.num_agents = n
+    cfg.gnn_layers = 0
+    cfg.gnn_head_layers = 1
+    cfg.device = "cpu"
+    cfg.precision = 32
+    cfg.compile = False
+    tools.set_seed_everywhere(args.seed)
+    wm = models.WorldModel(obs_space, _DummyActSpace(), 0, cfg)
+    n_h = sum(p.numel() for p in wm.parameters())
     print(f"       gnn_head_layers=0 参数量 {n_graph:,}")
     print(f"       gnn_head_layers=1 参数量 {n_h:,}  （+{n_h - n_graph:,}，两个头）")
     check("开了头 GNN 后参数变多", n_h > n_graph, f"+{n_h - n_graph:,}")
-    check("头 GNN 无 NaN", all(
-        np.isfinite(np.asarray(mets_h[k])).all()
-        for k in ["model_loss", "state_loss", "reward_loss", "cont_loss"]
-    ))
-    # reward / cont 接了图 → 它们的损失必须变
-    for key in ["reward_loss", "cont_loss"]:
-        check(f"{key} 变化（该头接了通信）",
-              not np.isclose(float(np.asarray(mets_h[key])),
-                             float(np.asarray(mets_graph[key]))))
-    # ★ 关键：论文要求 decoder 保持独立，所以 state_loss **必须逐位不变** ★
-    check("state_loss 完全不变（decoder 独立，论文明确要求）",
-          float(np.asarray(mets_h["state_loss"])) == float(np.asarray(mets_graph["state_loss"])),
-          f"head={float(np.asarray(mets_h['state_loss']))!r} "
-          f"base={float(np.asarray(mets_graph['state_loss']))!r}")
-    # 本轮 RSSM 的 GNN 是关的 → KL 不应受影响
-    check("kl 不变（本轮 RSSM GNN 关闭）",
-          np.isclose(float(np.asarray(mets_h["kl"])), float(np.asarray(mets_graph["kl"]))))
+
+    # --- 结构：哪几个头盖了 GNN，层数各是多少
+    feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
+    check("reward 头 GNN 层数 = 1", wm.heads["reward"]._gnn.num_layers == 1)
+    check("cont 头 GNN 层数 = 1", wm.heads["cont"]._gnn.num_layers == 1)
+    check(
+        "decoder 头 GNN 层数 = 0（论文明确要求保持独立）",
+        wm.heads["decoder"]._mlp._gnn.num_layers == 0,
+        f"{wm.heads['decoder']._mlp._gnn.num_layers}",
+    )
+
+    # --- 行为：头的输出确实随图变化
+    feat = torch.randn(b, t, n, feat_size)
+    adj_b = batch["adjacency"].clone()
+    adj_b[..., 0, 2] = 1.0
+    adj_b[..., 2, 0] = 1.0          # 多连一条边：0-2 相连
+    mean_a = batch["edge_features"].clone()
+    mean_b = batch["edge_features"].clone()
+    mean_b[..., 0, 2, :] = 0.5      # 并改一下那条边的边特征
+    mean_b[..., 2, 0, :] = 0.5
+
+    for name in ["reward", "cont"]:
+        head = wm.heads[name]
+        out_a = head(feat, graph=(batch["adjacency"], mean_a)).mean
+        out_b = head(feat, graph=(adj_b, mean_b)).mean
+        check(
+            f"{name} 头对图有响应（改边/改边特征会改变输出）",
+            not torch.allclose(out_a, out_b),
+            f"max|Δ|={float((out_a - out_b).abs().max()):.3e}",
+        )
+
+    # --- state_loss 必须逐位不变（decoder 在真实训练路径上不受影响）
+    mets_h, _ = train_once(
+        config, obs_space, batch, n, args.seed, gnn_layers=0, gnn_head_layers=1
+    )
+    check(
+        "state_loss 完全不变（decoder 独立，论文明确要求）",
+        float(np.asarray(mets_h["state_loss"])) == float(np.asarray(mets_graph["state_loss"])),
+        f"head={float(np.asarray(mets_h['state_loss']))!r} "
+        f"base={float(np.asarray(mets_graph['state_loss']))!r}",
+    )
+    check(
+        "kl 不变（本轮 RSSM GNN 关闭）",
+        np.isclose(float(np.asarray(mets_h["kl"])), float(np.asarray(mets_graph["kl"]))),
+    )
 
     print("\n[7] 结论")
     if not FAILURES:
