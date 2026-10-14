@@ -344,9 +344,9 @@ def plot(results, out: pathlib.Path) -> None:
         ax.scatter([i], [scores.mean()], marker="D", s=34, color=color,
                    edgecolor="white", linewidth=0.8, zorder=4)
     ax.axhline(0.0, color="gray", linestyle="--", linewidth=0.8)
-    ax.set_ylabel("episode return（0 = 满分）")
-    ax.set_title("独立部署评测：同一批局上的策略表现\n"
-                 "（箱体 = 四分位距，菱形 = 均值，散点 = 逐局）")
+    ax.set_ylabel("episode return (0 = optimal)")
+    ax.set_title("Deployment evaluation: same fixed episodes for every checkpoint\n"
+                 "(box = IQR, diamond = mean, dots = individual episodes)")
     ax.grid(axis="y", alpha=0.25)
     fig.tight_layout()
     fig.savefig(out, dpi=150)

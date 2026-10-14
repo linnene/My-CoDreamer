@@ -115,18 +115,18 @@ def main() -> int:
         c = COLORS[i % len(COLORS)]
         xs, ys = series(rows, "eval_return")
         if xs.size:
-            ax.plot(xs, ys, "-o", color=c, label=f"{name} 评测", markersize=3.5)
+            ax.plot(xs, ys, "-o", color=c, label=f"{name} eval", markersize=3.5)
         xs, ys = series(rows, "train_return")
         if xs.size:
             ax.plot(xs, smooth(ys, args.smooth), color=c, alpha=0.3, linewidth=1.1,
-                    label=f"{name} 训练（平滑）")
+                    label=f"{name} train (smoothed)")
         cut = cutoff_step(rows)
         if cut is not None:
             ax.axvline(cut, color=c, linestyle="--", linewidth=1.1, alpha=0.75)
     ax.axhline(0.0, color="gray", linestyle=":", linewidth=0.8)
-    ax.set_xlabel("训练步")
-    ax.set_ylabel("episode return（0 = 满分）")
-    ax.set_title("① 全周期\n（虚线 = 环境切断）")
+    ax.set_xlabel("training step")
+    ax.set_ylabel("episode return (0 = optimal)")
+    ax.set_title("(1) full run\n(dashed line = environment cut off)")
     ax.grid(alpha=0.25)
     ax.legend(fontsize=7)
 
@@ -152,9 +152,9 @@ def main() -> int:
                 xytext=(3, -10), textcoords="offset points",
             )
     ax.axhline(0.0, color="gray", linestyle=":", linewidth=0.8)
-    ax.set_xlabel("训练步")
-    ax.set_ylabel("评测回报")
-    ax.set_title("② 切断环境之后\n（纯想象训练，无任何新数据）")
+    ax.set_xlabel("training step")
+    ax.set_ylabel("eval return")
+    ax.set_title("(2) after the environment is cut off\n(imagination only, no new data)")
     ax.grid(alpha=0.25)
     if ax.get_legend_handles_labels()[0]:
         ax.legend(fontsize=8)
@@ -171,9 +171,9 @@ def main() -> int:
         cut = cutoff_step(rows)
         if cut is not None:
             ax.axvline(cut, color=c, linestyle="--", linewidth=1.1, alpha=0.75)
-    ax.set_xlabel("训练步")
-    ax.set_ylabel("预测损失（越小越好）")
-    ax.set_title("③ 世界模型预测损失\n（切断后若持续爬升 → 想象在自欺）")
+    ax.set_xlabel("training step")
+    ax.set_ylabel("prediction loss (lower is better)")
+    ax.set_title("(3) world model prediction loss\n(climbing after the cut => imagination is self-deceiving)")
     ax.grid(alpha=0.25)
     ax.legend(fontsize=7, ncol=2)
 
@@ -199,10 +199,10 @@ def main() -> int:
                        edgecolor="white", linewidth=0.8, zorder=4)
         ax.axhline(0.0, color="gray", linestyle=":", linewidth=0.8)
         ax.set_ylabel("episode return")
-        ax.set_title("④ 独立部署评测\n（同一批固定局，菱形 = 均值）")
+        ax.set_title("(4) deployment evaluation\n(same fixed episodes, diamond = mean)")
         ax.grid(axis="y", alpha=0.25)
 
-    fig.suptitle("环境切断实验：世界模型能撑住策略多久", fontsize=13)
+    fig.suptitle("Cutting the environment off: how long can the world model carry the policy?", fontsize=13)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     out = pathlib.Path(args.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
