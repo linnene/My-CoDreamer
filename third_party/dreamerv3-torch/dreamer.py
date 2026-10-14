@@ -184,7 +184,10 @@ def make_env(config, mode, id):
             target_transform=config.seg_target_transform,
         )
         return seg_gym.SequentialEstimateGameEnv(
-            spec, seed=config.seed + id, obs_mode=config.seg_obs_mode
+            spec,
+            seed=config.seed + id,
+            obs_mode=config.seg_obs_mode,
+            graph_obs=config.seg_graph_obs,
         )
     if suite == "dmc":
         import envs.dmc as dmc

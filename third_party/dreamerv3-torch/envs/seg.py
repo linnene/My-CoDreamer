@@ -180,6 +180,29 @@ class SequentialEstimateGame:
         return [np.flatnonzero(row) for row in self.adjacency]
 
     @property
+    def edge_feature_dim(self) -> int:
+        """每条边的特征维度。见 `edge_features()`。"""
+        return 1
+
+    def edge_features(self) -> np.ndarray:
+        """边特征 (N, N, F) —— 邻居之间的"相对距离"。
+
+        论文（§2.2.1）：
+            "All graphs have edge features representing the relative distances
+             between agents, which are used with observations in the GAT V2 to
+             calculate attention coefficients for neighborhood aggregation."
+
+        Estimate Game 里 agent 没有物理位置，它的"位置"就是标量状态 s_i ∈ [0,1]，
+        因此取 |s_i - s_j|。非边处填 0（GATv2 只在存在的边上使用边特征）。
+
+        ⚠️ 论文**没有**针对本环境给出边特征的定义（VMAS 那边是欧氏距离，很明确）。
+        这是我们的读法，已登记于模块 docstring 的复现风险清单。
+        """
+        s = self.state
+        dist = np.abs(s[:, None] - s[None, :])
+        return (dist * self.adjacency)[..., None].astype(np.float32)
+
+    @property
     def timestep(self) -> int:
         return self._t
 
@@ -534,6 +557,25 @@ def _self_test() -> None:
 
     check("deterministic given seed", bool(np.allclose(rollout(5), rollout(5))))
     check("different seeds differ", not np.allclose(rollout(5), rollout(6)))
+
+    # --- 图结构（GNN 需要）：邻接矩阵与边特征
+    a = game.adjacency
+    check("adjacency symmetric already covered", bool((a == a.T).all()))
+    e = game.edge_features()
+    check("edge_features shape (N,N,1)", e.shape == (4, 4, 1), str(e.shape))
+    check("edge_features dtype float32", e.dtype == np.float32, str(e.dtype))
+    check("edge_features 非边处为 0", bool((e[~a] == 0).all()))
+    check("edge_features 对角线为 0", bool((np.diagonal(e, axis1=0, axis2=1) == 0).all()))
+    check("edge_features 仅在边上非负", bool((e >= 0).all()))
+    # 边特征必须等于两端的 |s_i - s_j|
+    s_now = game.state
+    expect = np.abs(s_now[:, None] - s_now[None, :])
+    check(
+        "edge_features == |s_i - s_j|（边上）",
+        bool(np.allclose(e[..., 0][a], expect[a], atol=1e-6)),
+    )
+    # 邻接矩阵的每一行就是单个 agent 的"视图"（rollout 按 agent 切分时依赖这一点）
+    check("adjacency 行可单独取出（每 agent 一行）", a[0].shape == (4,), str(a[0].shape))
 
     print("-" * 68)
     if failures:

@@ -85,6 +85,32 @@ __all__ = ["SequentialEstimateGameEnv"]
 OBS_MODES = ("local", "oracle")
 
 
+# =============================================================================
+# 图结构（GNN 需要的拓扑）
+# =============================================================================
+# CoDreamer 与 IDreamer 的唯一区别就是"通信"。通信必须作用在一张图上，而
+# 论文明确规定：**图是环境给的，不是学出来的**（§2.2.1）：
+#
+#     "an edge is created if ||p_i - p_j|| <= C,
+#      where C is the communication range set by the environment"
+#
+# 所以环境必须吐出拓扑。本环境把它作为两个【逐 agent】的观测键附加在 obs dict
+# 里（每个 agent 只拿自己那一行）：
+#
+#     "adjacency"      (N,)     邻接矩阵的第 i 行 —— 谁是我的邻居
+#     "edge_features"  (N, F)   边特征的第 i 行 —— 我与各邻居的距离
+#
+# 为什么按"行"而不是给整个 (N,N) 矩阵：`tools_marl.simulate_marl` 写入 replay 时
+# 是 `{key: val[k] for k in agents}` 逐个 agent 切的。给出 (N,N) 的矩阵，切到
+# 第 k 个 agent 自然就是第 k 行 —— 和现有机制完全契合，不需要任何特例。
+# 训练时把同一队 N 个 agent 的行堆起来，就还原出完整的 A 和 E。
+#
+# ⚠️ 这两个键**要声明在 observation_space 里**（否则空间描述不完整），但必须在
+# encoder/decoder 的 mlp_keys 里**排除掉** —— 否则 `mlp_keys: '.*'` 会试图把
+# 邻接矩阵当成特征去编码。见 configs.yaml 的 codreamer 块。
+GRAPH_OBS_KEYS = ("adjacency", "edge_features")
+
+
 class SequentialEstimateGameEnv:
     """队伍级环境。对外接口刻意贴近 gym，但不继承 gym.Env（多智能体不是 gym 语义）。"""
 
@@ -96,6 +122,7 @@ class SequentialEstimateGameEnv:
         seed: int | None = None,
         add_agent_index: bool = True,
         obs_mode: str = "local",
+        graph_obs: bool = False,
     ) -> None:
         if obs_mode not in OBS_MODES:
             raise ValueError(f"unknown obs_mode: {obs_mode} (expected one of {OBS_MODES})")
@@ -103,6 +130,7 @@ class SequentialEstimateGameEnv:
         self.game = SequentialEstimateGame(self.spec, seed=seed)
         self._add_agent_index = add_agent_index
         self._obs_mode = obs_mode
+        self._graph_obs = bool(graph_obs)
         self._seed = seed
         self._rng = np.random.default_rng(seed)
 
@@ -115,13 +143,24 @@ class SequentialEstimateGameEnv:
             d_eff = d              # 只有自己的
         agent_dim = d_eff + (n if add_agent_index else 0)
 
-        self.observation_space = gym.spaces.Dict(
-            {
-                "state": gym.spaces.Box(
-                    low=-np.inf, high=np.inf, shape=(agent_dim,), dtype=np.float32
-                ),
-            }
-        )
+        spaces = {
+            "state": gym.spaces.Box(
+                low=-np.inf, high=np.inf, shape=(agent_dim,), dtype=np.float32
+            ),
+        }
+        if self._graph_obs:
+            # 邻接矩阵第 i 行（0/1）与边特征第 i 行。
+            # 形状都是【单 agent 视角】，与 "state" 的约定一致。
+            spaces["adjacency"] = gym.spaces.Box(
+                low=0.0, high=1.0, shape=(n,), dtype=np.float32
+            )
+            spaces["edge_features"] = gym.spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(n, self.spec_edge_feature_dim),
+                dtype=np.float32,
+            )
+        self.observation_space = gym.spaces.Dict(spaces)
         self.action_space = gym.spaces.Discrete(self.spec.num_actions)
         # 上游约定：离散环境自己给动作空间打这个标记（atari.py / crafter.py /
         # memorymaze.py / OneHotAction 都这么做）。dreamer.py 靠它选择
@@ -138,6 +177,14 @@ class SequentialEstimateGameEnv:
     @property
     def num_agents(self) -> int:
         return self.spec.num_agents
+
+    @property
+    def spec_edge_feature_dim(self) -> int:
+        return self.game.edge_feature_dim
+
+    @property
+    def graph_obs(self) -> bool:
+        return self._graph_obs
 
     @property
     def adjacency(self) -> np.ndarray:
@@ -167,11 +214,17 @@ class SequentialEstimateGameEnv:
             state.shape,
             self.observation_space["state"].shape,
         )
-        return {
+        out = {
             "state": state,
             "is_first": np.full(n, is_first, dtype=bool),
             "is_terminal": np.full(n, is_terminal, dtype=bool),
         }
+        if self._graph_obs:
+            # 只给"我自己那一行" —— rollout 按 agent 切分后，每个 agent 的
+            # episode 流里就是它自己的图视图，堆起来即还原整张图。
+            out["adjacency"] = self.game.adjacency.astype(np.float32)          # (N, N)
+            out["edge_features"] = self.game.edge_features()                    # (N, N, F)
+        return out
 
     # ------------------------------------------------------------------ 接口
 
@@ -301,6 +354,47 @@ def _self_test() -> None:
     adj = env3.adjacency
     check("整个队伍共享一张邻接矩阵", adj.shape == (n, n), str(adj.shape))
     check("邻接矩阵无自环", bool(not np.diag(adj).any()))
+
+    # --- 图结构（graph_obs）—— CoDreamer 的 GNN 需要拓扑
+    envg = SequentialEstimateGameEnv(Spec(), seed=0, graph_obs=True)
+    check("graph_obs 声明 adjacency", "adjacency" in envg.observation_space.spaces)
+    check("graph_obs 声明 edge_features", "edge_features" in envg.observation_space.spaces)
+    check(
+        "graph_obs: adjacency 空间是单 agent 形状 (N,)",
+        envg.observation_space["adjacency"].shape == (n,),
+        str(envg.observation_space["adjacency"].shape),
+    )
+    check(
+        "graph_obs: edge_features 空间是单 agent 形状 (N,F)",
+        envg.observation_space["edge_features"].shape == (n, 1),
+        str(envg.observation_space["edge_features"].shape),
+    )
+    og = envg.reset()
+    check("graph_obs: reset 带 agent 轴 (N,N)",
+          og["adjacency"].shape == (n, n), str(og["adjacency"].shape))
+    check("graph_obs: edge_features 带 agent 轴 (N,N,F)",
+          og["edge_features"].shape == (n, n, 1), str(og["edge_features"].shape))
+    check("graph_obs: dtype float32", og["adjacency"].dtype == np.float32,
+          str(og["adjacency"].dtype))
+    # 关键性质：每个 agent 那一行堆起来 == 完整的 A（这是"按 agent 存、按队还原"的基础）
+    check(
+        "graph_obs: N 行可还原完整邻接矩阵",
+        bool(np.array_equal(og["adjacency"], envg.adjacency.astype(np.float32))),
+    )
+    # step 之后图仍在（且在 episode 内不变）
+    og2, _, _, _ = envg.step(np.zeros(n, dtype=int))
+    check("graph_obs: step 后仍带图", "adjacency" in og2)
+    check("graph_obs: episode 内邻接不变",
+          bool(np.array_equal(og["adjacency"], og2["adjacency"])))
+    check("graph_obs: state 维度不受影响",
+          og["state"].shape == (n, d + n), str(og["state"].shape))
+    # 默认关闭时不能出现这两个键（保证旧行为逐位不变）
+    envl = SequentialEstimateGameEnv(Spec(), seed=0)
+    ol = envl.reset()
+    check("默认不带图结构键（旧行为不变）",
+          not any(k in ol for k in GRAPH_OBS_KEYS), str(list(ol)))
+    check("默认 observation_space 不含图结构",
+          not any(k in envl.observation_space.spaces for k in GRAPH_OBS_KEYS))
 
     print("-" * 68)
     if failures:
