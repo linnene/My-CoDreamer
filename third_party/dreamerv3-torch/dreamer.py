@@ -123,10 +123,12 @@ class Dreamer(nn.Module):
         # 曾经只有训练路径（_train -> _imagine）传图，_policy 这里一个字都没提。
         # 后果是：收集数据用的动作来自一个看不见图的 actor，而世界模型是带着图训练
         # 的；部署评测也评的是看不见图的策略。CoDreamer 于是从未在真实执行中使用通信。
-        # 采集时 simulate_marl 把每队 (N,·) 拼成 (batch,·)，所以这里 adjacency 的形状
-        # 正好是 (batch, N, N)，与 img_step 里 GNN 要求的形状一致。
+        #
+        # 用 execution_graph 而不是 graph_from_data：执行时的观测被 simulate_marl
+        # 铺平过，图形状是 (batch, N)（一堆行），必须显式还原成 (batch, N, N)。
+        # 直接喂 graph_from_data 的输出会让 GNN 拿到错误形状（这一点差点又漏掉一次）。
         # 由 scripts/test_training_loop.py 盯死。
-        graph = models.graph_from_data(obs, self._config.device)
+        graph = models.execution_graph(obs, self._config.num_agents, self._config.device)
         latent, _ = self._wm.dynamics.obs_step(
             latent, action, embed, obs["is_first"], graph=graph
         )

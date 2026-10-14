@@ -55,6 +55,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 import ruamel.yaml as yaml  # noqa: E402
 
 import dreamer as dreamer_mod  # noqa: E402
+import models  # noqa: E402
 import tools  # noqa: E402
 import tools_marl  # noqa: E402
 
@@ -198,35 +199,40 @@ def flat_obs(env, seed: int = 0):
 # ---------------------------------------------------------------------------
 def section_pretrain(tmp: pathlib.Path) -> None:
     print("\n[1][2] 预训练到底训没训东西")
-    for pretrain, want_wm, want_actor, label in [
-        (5, True, False, "预训练 5 步：世界模型变、actor 逐位不变"),
-        (0, True, True, "非预训练：两者都变（[1] 的对照，防止假通过）"),
-    ]:
-        with tempfile.TemporaryDirectory() as d:
-            cfg, env, agent = build_run(pathlib.Path(d), variant="idreamer", pretrain=pretrain)
-            print(
-                f"  ({label})  update_world_model 期间 pretrain={pretrain}"
-            )
-            obs = flat_obs(env)
-            done = np.ones(cfg.num_agents, dtype=bool)
-            wm_before = snapshot(agent._wm)
-            actor_before = snapshot(agent._task_behavior.actor)
-            agent(obs, done, training=True)
-            wm_delta = max_diff(wm_before, snapshot(agent._wm))
-            actor_delta = max_diff(actor_before, snapshot(agent._task_behavior.actor))
+    with tempfile.TemporaryDirectory() as d:
+        cfg, env, agent = build_run(pathlib.Path(d), variant="idreamer", pretrain=5)
+        obs = flat_obs(env)
+        done = np.ones(cfg.num_agents, dtype=bool)
 
-            wm_changed = wm_delta > 0.0
-            actor_changed = actor_delta > 0.0
-            check(
-                f"pretrain={pretrain}: 世界模型{'变' if want_wm else '不变'}",
-                wm_changed == want_wm,
-                f"max|Δ|={wm_delta:.3e}",
-            )
-            check(
-                f"pretrain={pretrain}: actor {'变' if want_actor else '逐位不变'}",
-                actor_changed == want_actor,
-                f"max|Δ|={actor_delta:.3e}",
-            )
+        # 第一次调用就是预训练槽位（_should_pretrain 是 tools.Once）。
+        # 注意必须**只看第一次**：第二次开始就是正常训练，两者会混在一起。
+        wm_before = snapshot(agent._wm)
+        actor_before = snapshot(agent._task_behavior.actor)
+        agent(obs, done, training=True)
+        wm_delta = max_diff(wm_before, snapshot(agent._wm))
+        actor_delta = max_diff(actor_before, snapshot(agent._task_behavior.actor))
+        check("预训练 5 步：世界模型**变**了", wm_delta > 0.0, f"max|Δ|={wm_delta:.3e}")
+        check(
+            "预训练 5 步：actor **逐位不变**",
+            actor_delta == 0.0,
+            f"max|Δ|={actor_delta:.3e}",
+        )
+
+        # ★ 对照组，不能省 ★
+        # 只有上面两条时，"actor 不变"可能是因为整条回路压根没在学。
+        # 预训练结束后 actor 必须开始动，这才能证明上面那个 0 是真的 0。
+        wm_b2 = snapshot(agent._wm)
+        actor_b2 = snapshot(agent._task_behavior.actor)
+        for _ in range(3):
+            agent(obs, done, training=True)
+        wm_d2 = max_diff(wm_b2, snapshot(agent._wm))
+        actor_d2 = max_diff(actor_b2, snapshot(agent._task_behavior.actor))
+        check(
+            "对照：预训练结束后 actor 开始更新（否则上面的 0 是假通过）",
+            actor_d2 > 0.0,
+            f"max|Δ|={actor_d2:.3e}",
+        )
+        check("对照：世界模型继续更新", wm_d2 > 0.0, f"max|Δ|={wm_d2:.3e}")
 
 
 def section_freeze(tmp: pathlib.Path) -> None:
@@ -254,11 +260,37 @@ def section_execution_graph(tmp: pathlib.Path) -> None:
             cfg, env, agent = build_run(pathlib.Path(d), variant=variant, pretrain=0)
             obs = flat_obs(env)
             n = cfg.num_agents
+            batch = obs["adjacency"].shape[0]
 
-            # 造两张不同的邻接矩阵。只翻一条有向边，保证差异最小。
+            # ★ 先把形状钉死 ★
+            # 环境的观测里 adjacency 是**整张** (N, N)（同一份给所有 agent），
+            # simulate_marl 铺平后对 1 支队仍是 (N, N)，读作 (batch=N, N)。
+            # GNN 需要的是 (batch, N, N) —— 这个还原就靠 execution_graph。
+            # 这里如果形状错了，下面"改图不影响"的断言会因为错误的原因通过。
+            check(
+                "铺平后的 adjacency 是 (batch, N)（一堆行）",
+                obs["adjacency"].ndim == 2 and obs["adjacency"].shape[1] == n,
+                f"得到 {obs['adjacency'].shape}，期望 ({batch}, {n})",
+            )
+            g = models.execution_graph(obs, n, "cpu")
+            check(
+                "execution_graph 还原出 (batch, N, N)",
+                g is not None and tuple(g[0].shape) == (batch, n, n),
+                f"得到 {None if g is None else tuple(g[0].shape)}",
+            )
+            # 每支队伍的那一块必须等于它自己的邻接矩阵
+            n_teams = batch // n
+            ok = True
+            for t in range(n_teams):
+                base = obs["adjacency"].reshape(n_teams, n, n)[t]
+                blk = g[0].numpy().reshape(n_teams, n, n)[t]
+                ok = ok and np.array_equal(base, blk)
+            check("同一队的 N 个 agent 拿到同一张完整矩阵", ok)
+
+            # 翻一条有向边。adjacency 是 2 维 (batch, N)，批里每个 agent 各占一行。
             adj0 = np.asarray(obs["adjacency"], dtype=np.float32).copy()
             adj1 = adj0.copy()
-            adj1[:, 0, 1] = 1.0 - adj1[:, 0, 1]
+            adj1[0, 1] = 1.0 - adj1[0, 1]
             obs0 = dict(obs, adjacency=adj0)
             obs1 = dict(obs, adjacency=adj1)
             changed = float(np.abs(adj0 - adj1).max())

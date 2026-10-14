@@ -59,6 +59,66 @@ def graph_from_data(data, device=None, dtype=torch.float32):
     return adjacency, edge
 
 
+# [CoDreamer] 执行路径的图：把铺平的 (batch, N) 还原成 GNN 要的 (batch, N, N)
+#
+# 这里必须显式还原，因为**环境与数据管线使用的是两种不同的约定**：
+#
+#   环境          每个 agent 的观测里带的是**整张** (N, N) 邻接矩阵（同一份给所有
+#                 agent）—— 见 envs/seg_gym.py 的 _make_obs。
+#   数据管线      `_graph_chunk` 把 N 个 agent 各自的那一行堆起来，得到 (T, N, N)。
+#
+# 两者恰好自洽：agent k 存的那一行就是矩阵的第 k 行，所以堆起来正好还原矩阵。
+# 但中间要经过 simulate_marl 的 `np.concatenate([o[k] for o in obs], 0)`：
+# 每份 (N, N) 沿 dim 0 拼起来得到 (n_teams*N, N) —— **每一行恰好是某支队伍
+# 邻接矩阵的某一行**。GNN 要的是 (..., N, N)，直接把这堆行喂进去是错的。
+#
+# 所以这里把它读作 (n_teams, N, N) 再按 agent 广播回去。
+#
+# ⚠️ 依赖 simulate_marl 的一个不变量：batch 里 agent 是按队伍连续、且队伍内按
+#    agent 下标 0..N-1 排列的。这不是偶然 —— `np.concatenate([o[k] for o in obs], 0)`
+#    与 `acts.reshape(n_teams, n_agents, ·)` 用的就是同一个顺序，所以是真实约束。
+#    下面用 assert 把它变成会报错的东西，而不是注释里的默契。
+def execution_graph(obs, num_agents, device=None, dtype=torch.float32):
+    """执行路径（单步、无时间维）的 (adjacency, edge_features)，形状 (B, N, N)。
+
+    训练路径用 `graph_from_data` + `flatten_graph`（数据已经是 (B, T, N, N)）；
+    执行路径的观测被 simulate_marl 铺平过，必须走这个不同的入口。
+    """
+    if "adjacency" not in obs:
+        return None
+    n = int(num_agents)
+    def as_tensor(v):
+        if torch.is_tensor(v):
+            return v.to(device=device, dtype=dtype) if device is not None else v
+        return torch.as_tensor(v, dtype=dtype, device=device)
+
+    adjacency = as_tensor(obs["adjacency"])
+    if adjacency.dim() != 2:
+        raise ValueError(
+            f"执行路径的 adjacency 应该是 (n_teams*N, N) = {(adjacency.shape[0], n)}，"
+            f"得到 {tuple(adjacency.shape)}。环境改了图形状？"
+        )
+    batch = adjacency.shape[0]
+    if batch % n != 0:
+        raise ValueError(
+            f"batch={batch} 不是 agent 数 {n} 的整数倍 —— 无法还原队伍的邻接矩阵。"
+        )
+    n_teams = batch // n
+    # (n_teams, N, N) -> (n_teams*N, N, N)，每队的矩阵广播给它自己的 N 个 agent
+    adjacency = adjacency.reshape(n_teams, n, n).repeat_interleave(n, dim=0)
+
+    edge = None
+    if "edge_features" in obs:
+        edge = as_tensor(obs["edge_features"])
+        if edge.dim() != 3 or edge.shape[:2] != (batch, n):
+            raise ValueError(
+                f"执行路径的 edge_features 应该是 (n_teams*N, N, F)，"
+                f"得到 {tuple(edge.shape)}"
+            )
+        edge = edge.reshape(n_teams, n, n, edge.shape[-1]).repeat_interleave(n, dim=0)
+    return adjacency, edge
+
+
 # [CoDreamer] 图批次 (B, T, N, N) -> (B*T, N, N)
 def flatten_graph(graph):
     """把图的时间维与 batch 维合并，与 `ImagBehavior._imagine` 对隐状态做的 flatten
