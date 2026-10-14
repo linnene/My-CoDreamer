@@ -217,18 +217,43 @@ def main() -> int:
         f"  环境     task={config.task}  agents={config.seg_num_agents}  "
         f"horizon={config.seg_horizon}  graph_obs={config.seg_graph_obs}"
     )
-    print(
-        f"  模型     rssm_gnn={config.gnn_layers}  head_gnn={config.gnn_head_layers}"
-    )
     print(f"  评测     {args.episodes} agent 局 / checkpoint，环境每次重建（同一批局）")
     print()
 
-    agent = build_agent(config, args.device)
-    n_params = sum(p.numel() for p in agent.parameters())
+    agent = None
+    active_key = None
+    n_params = 0
+
+    def config_key(cfg):
+        """模型结构相关的超参。变了就必须重建模型。"""
+        return (
+            cfg.task, cfg.gnn_layers, cfg.gnn_head_layers, cfg.gnn_heads,
+            cfg.seg_num_agents, cfg.seg_graph_obs, cfg.seg_num_actions,
+            cfg.seg_horizon, cfg.dyn_stoch, cfg.dyn_deter, cfg.units,
+        )
 
     results = []
     for name, path in checkpoints:
         ckpt = load_checkpoint(path, args.device)
+        cfg = argparse.Namespace(**ckpt["config"])
+        cfg.device = args.device
+        cfg.eval_episode_num = args.episodes
+
+        key = config_key(cfg)
+        if key != active_key:
+            if agent is not None:
+                print(
+                    f"  -- config 变化（gnn={cfg.gnn_layers} "
+                    f"head={cfg.gnn_head_layers}）-> 重建模型"
+                )
+            agent = build_agent(cfg, args.device)
+            n_params = sum(p.numel() for p in agent.parameters())
+            active_key = key
+            print(
+                f"  模型     rssm_gnn={cfg.gnn_layers}  head_gnn={cfg.gnn_head_layers}  "
+                f"参数量 {n_params:,}"
+            )
+
         missing, unexpected = agent.load_state_dict(ckpt["agent_state_dict"], strict=False)
         real_missing = [k for k in missing if not k.startswith("_")]
         if real_missing:
@@ -239,7 +264,7 @@ def main() -> int:
         if unexpected:
             print(f"  [警告] {name}: 多出 {len(unexpected)} 个键被忽略")
         agent.eval()
-        r = evaluate(agent, config, args.episodes, args.device)
+        r = evaluate(agent, cfg, args.episodes, args.device)
         r["name"] = name
         r["path"] = str(path)
         results.append(r)
@@ -250,7 +275,6 @@ def main() -> int:
         )
 
     print()
-    print(f"  参数量 {n_params:,}")
 
     if len(results) > 1:
         print()
