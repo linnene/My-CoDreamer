@@ -441,7 +441,95 @@ def main() -> int:
         np.isclose(float(np.asarray(mets_h["kl"])), float(np.asarray(mets_graph["kl"]))),
     )
 
-    print("\n[8] 结论")
+    print("\n[8] actor-critic：自带的 GNN + 想象阶段的冻结图")
+    # 这一步要证明三件事：
+    #   ① actor / critic 各自盖了 GNN；
+    #   ② 想象循环里**真的把图传下去了**（RSSM 的 img_step 与 actor 都用它）；
+    #   ③ 关掉 GNN 时图完全不漏 —— 否则 IDreamer 就被污染了。
+
+    def build(g_layers, b_layers, h_layers):
+        c = copy.deepcopy(config)
+        c.num_agents = n
+        c.gnn_layers = g_layers
+        c.gnn_behavior_layers = b_layers
+        c.gnn_head_layers = h_layers
+        c.device = "cpu"
+        c.precision = 32
+        c.compile = False
+        tools.set_seed_everywhere(args.seed)
+        wm = models.WorldModel(obs_space, _DummyActSpace(), 0, c)
+        return c, wm, models.ImagBehavior(c, wm)
+
+    cfg_on, wm_on, imag_on = build(1, 1, 1)
+    cfg_off, wm_off, imag_off = build(0, 0, 0)
+
+    check("actor 的 GNN 层数 = 1", imag_on.actor._gnn.num_layers == 1)
+    check("critic 的 GNN 层数 = 1", imag_on.value._gnn.num_layers == 1)
+    check("关掉时 actor 不插 GNN", imag_off.actor._gnn.num_layers == 0)
+    check("关掉时 critic 不插 GNN", imag_off.value._gnn.num_layers == 0)
+
+    n_a_on = sum(p.numel() for p in imag_on.actor.parameters())
+    n_a_off = sum(p.numel() for p in imag_off.actor.parameters())
+    n_v_on = sum(p.numel() for p in imag_on.value.parameters())
+    n_v_off = sum(p.numel() for p in imag_off.value.parameters())
+    print(f"       actor  {n_a_off:,} -> {n_a_on:,}  (+{n_a_on - n_a_off:,})")
+    print(f"       critic {n_v_off:,} -> {n_v_on:,}  (+{n_v_on - n_v_off:,})")
+    check("actor 因为 GNN 变多参数", n_a_on > n_a_off, f"+{n_a_on - n_a_off:,}")
+    check("critic 因为 GNN 变多参数", n_v_on > n_v_off, f"+{n_v_on - n_v_off:,}")
+
+    # --- 想象轨迹对图是否敏感
+    horizon = 3
+    start = wm_on.dynamics.initial((b * t, n))
+    adj0 = torch.as_tensor(batch["adjacency"]).reshape(b * t, n, n).clone()
+    edge0 = torch.as_tensor(batch["edge_features"]).reshape(b * t, n, n, 1).clone()
+    adj1 = adj0.clone()
+    adj1[..., 0, 2] = 1.0 - adj1[..., 0, 2]      # 翻转 0-2 这条边
+    adj1[..., 2, 0] = adj1[..., 0, 2]
+
+    with torch.no_grad():
+        f_a, _, _ = imag_on._imagine(start, imag_on.actor, horizon, graph=(adj0, edge0))
+        f_b, _, _ = imag_on._imagine(start, imag_on.actor, horizon, graph=(adj1, edge0))
+        d_on = float((f_a - f_b).abs().max())
+        check("开了 GNN：改图会改变想象的轨迹（图确实传进了 img_step）",
+              d_on > 1e-6, f"max|\u0394|={d_on:.3e}")
+
+        start0 = wm_off.dynamics.initial((b * t, n))
+        g_a, _, _ = imag_off._imagine(start0, imag_off.actor, horizon, graph=(adj0, edge0))
+        g_b, _, _ = imag_off._imagine(start0, imag_off.actor, horizon, graph=(adj1, edge0))
+        d_off = float((g_a - g_b).abs().max())
+        check("关掉 GNN：改图**完全不影响**任何东西（图不漏进 IDreamer）",
+              d_off == 0.0, f"max|\u0394|={d_off:.3e}")
+
+    # --- actor / critic 自己对图的响应（结构检查之外的行为检查）
+    feat_size = config.dyn_stoch * config.dyn_discrete + config.dyn_deter
+    probe = torch.randn(4, b * t, n, feat_size)
+    with torch.no_grad():
+        p0 = imag_on.actor(probe, graph=(adj0, edge0)).probs
+        p1 = imag_on.actor(probe, graph=(adj1, edge0)).probs
+        check("actor 的输出随图变化",
+              not torch.allclose(p0, p1), f"max|\u0394|={float((p0 - p1).abs().max()):.3e}")
+        v0 = imag_on.value(probe, graph=(adj0, edge0)).mode()
+        v1 = imag_on.value(probe, graph=(adj1, edge0)).mode()
+        check("critic 的输出随图变化",
+              not torch.allclose(v0, v1), f"max|\u0394|={float((v0 - v1).abs().max()):.3e}")
+
+    # --- 端到端：带 agent 轴的完整想象 + 损失反传
+    start_e = wm_on.dynamics.initial((b * t, n))
+    rew = lambda f, s, a: wm_on.heads["reward"](
+        wm_on.dynamics.get_feat(s), graph=(adj0, edge0)
+    ).mode()
+    try:
+        out = imag_on._train(start_e, rew, graph=(adj0, edge0))
+        check("ImagBehavior._train 带 agent 轴与图能跑通", True)
+        check("actor_loss / value_loss 有限",
+              all(np.isfinite(float(out[-1][k])) for k in ["actor_loss", "value_loss"]),
+              f"actor={float(out[-1]['actor_loss']):.4f} value={float(out[-1]['value_loss']):.4f}")
+        check("想象特征保留了 agent 轴", tuple(out[0].shape[1:3]) == (b * t, n),
+              str(tuple(out[0].shape)))
+    except Exception as e:  # noqa: BLE001
+        check("ImagBehavior._train 带 agent 轴与图能跑通", False, repr(e))
+
+    print("\n[9] 结论")
     if not FAILURES:
         print("      ✓ 数据管线 (B,T,N,·) 与展平路径等价（相对误差在 float32 机器精度量级）")
         print("      ✓ GNN 已接入 RSSM 的 GRU 咽喉点，开/关确实改变计算结果")

@@ -59,6 +59,22 @@ def graph_from_data(data, device=None, dtype=torch.float32):
     return adjacency, edge
 
 
+# [CoDreamer] 图批次 (B, T, N, N) -> (B*T, N, N)
+def flatten_graph(graph):
+    """把图的时间维与 batch 维合并，与 `ImagBehavior._imagine` 对隐状态做的 flatten
+    保持一致。
+
+    B 与 T 是相邻的前置维，所以直接 reshape 就是对的（不需要转置）。
+    想象阶段用**起点那张图**并用到底（论文："the adjacency matrix of the starting
+    graph is used for all subsequent graphs"），所以只需要一份扁平化的图。
+    """
+    if graph is None:
+        return None
+    return tuple(
+        None if g is None else g.reshape([-1] + list(g.shape[2:])) for g in graph
+    )
+
+
 class RewardEMA:
     """running mean and std"""
 
@@ -89,6 +105,8 @@ class WorldModel(nn.Module):
         # [CoDreamer] 边特征维度由环境声明（`edge_features` 的最后一维）。
         # 没开图时就为 0，RSSM 里不建边投影。
         edge_dim = shapes.get("edge_features", (0,))[-1]
+        # [CoDreamer] 留给 ImagBehavior：actor/critic 的 GNN 需要同样的边维度
+        self.edge_dim = edge_dim
         self.dynamics = networks.RSSM(
             config.dyn_stoch,
             config.dyn_deter,
@@ -347,6 +365,11 @@ class ImagBehavior(nn.Module):
             unimix_ratio=config.actor["unimix_ratio"],
             outscale=config.actor["outscale"],
             name="Actor",
+            # [CoDreamer] 论文 Table 3：Actor-Critic GNN Layers = 1。
+            # 两个网络各自一层，与 reward/cont 头同样的位置（作用在 units 维隐层上）。
+            gnn_layers=config.gnn_behavior_layers,
+            gnn_edge_dim=getattr(world_model, "edge_dim", 0),
+            gnn_heads=config.gnn_heads,
         )
         self.value = networks.MLP(
             feat_size,
@@ -359,6 +382,9 @@ class ImagBehavior(nn.Module):
             outscale=config.critic["outscale"],
             device=config.device,
             name="Value",
+            gnn_layers=config.gnn_behavior_layers,
+            gnn_edge_dim=getattr(world_model, "edge_dim", 0),
+            gnn_heads=config.gnn_heads,
         )
         if config.critic["slow_target"]:
             self._slow_value = copy.deepcopy(self.value)
@@ -397,21 +423,29 @@ class ImagBehavior(nn.Module):
         self,
         start,
         objective,
+        graph=None,
     ):
+        """
+        graph: None 或 (adjacency, edge_features)，形状 (B*T, N, N) / (B*T, N, N, F)。
+               **已经扁平化**（与 start 同形），且是**想象轨迹起点那张图**，
+               整段轨迹都用它 —— 论文："CoDreamer does not predict new adjacency
+               matrices over the imagined trajectories, the adjacency matrix of the
+               starting graph is used for all subsequent graphs"。
+        """
         self._update_slow_target()
         metrics = {}
 
         with tools.RequiresGrad(self.actor):
             with torch.cuda.amp.autocast(self._use_amp):
                 imag_feat, imag_state, imag_action = self._imagine(
-                    start, self.actor, self._config.imag_horizon
+                    start, self.actor, self._config.imag_horizon, graph=graph
                 )
                 reward = objective(imag_feat, imag_state, imag_action)
-                actor_ent = self.actor(imag_feat).entropy()
+                actor_ent = self.actor(imag_feat, graph=graph).entropy()
                 state_ent = self._world_model.dynamics.get_dist(imag_state).entropy()
                 # this target is not scaled by ema or sym_log.
                 target, weights, base = self._compute_target(
-                    imag_feat, imag_state, reward
+                    imag_feat, imag_state, reward, graph=graph
                 )
                 actor_loss, mets = self._compute_actor_loss(
                     imag_feat,
@@ -419,6 +453,7 @@ class ImagBehavior(nn.Module):
                     target,
                     weights,
                     base,
+                    graph=graph,
                 )
                 actor_loss -= self._config.actor["entropy"] * actor_ent[:-1, ..., None]
                 actor_loss = torch.mean(actor_loss)
@@ -427,7 +462,7 @@ class ImagBehavior(nn.Module):
 
         with tools.RequiresGrad(self.value):
             with torch.cuda.amp.autocast(self._use_amp):
-                value = self.value(value_input[:-1].detach())
+                value = self.value(value_input[:-1].detach(), graph=graph)
                 # [CoDreamer] 上游这里还会再 `target = torch.stack(target, dim=1)`：
                 # 旧的 lambda_return 返回元组，而 `_compute_actor_loss` 里的 stack
                 # 是**局部变量**，所以外层这个 target 仍是元组，需要再展开一次。
@@ -437,7 +472,7 @@ class ImagBehavior(nn.Module):
                 #  是靠真实训练发现的。）
                 # (time, batch, 1), (time, batch, 1) -> (time, batch)
                 value_loss = -value.log_prob(target.detach())
-                slow_target = self._slow_value(value_input[:-1].detach())
+                slow_target = self._slow_value(value_input[:-1].detach(), graph=graph)
                 if self._config.critic["slow_target"]:
                     value_loss -= value.log_prob(slow_target.mode().detach())
                 # (time, batch, 1), (time, batch, 1) -> (1,)
@@ -461,33 +496,26 @@ class ImagBehavior(nn.Module):
             metrics.update(self._value_opt(value_loss, self.value.parameters()))
         return imag_feat, imag_state, imag_action, weights, metrics
 
-    def _imagine(self, start, policy, horizon):
+    def _imagine(self, start, policy, horizon, graph=None):
         dynamics = self._world_model.dynamics
         flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
+        # start 是 (B, T, N, ·)；(B,T) 相邻，合并成轨迹维后是 (B*T, N, ·)。
+        # 图由调用方用 models.flatten_graph 做过同样的扁平化，两者对齐。
         start = {k: flatten(v) for k, v in start.items()}
-        if self._config.num_agents > 1:
-            # [CoDreamer] ★ 步骤 3 的临时状态 ★
-            #
-            # start 现在是 (B*T, N, ·)：(B,T) 已合成轨迹维，agent 轴保留。
-            # 但 actor-critic 还没接自己的 GNN（论文 Table 3 的 GNN Layers=1），
-            # 而 upstream 的 lambda_return 末尾硬编码了
-            #   reshape([shape[0], shape[1], 1])
-            # 对形状有强假设，同时带 agent 轴会很难改动。
-            #
-            # 所以这里把 agent 轴**也**折进 batch，让 AC 完全走 upstream 的路径
-            # （等价于 IDreamer 的 AC）。世界模型的 GNN 仍然生效 —— 它作用在
-            # img_step 里，不受这个折平影响。
-            #
-            # 步骤 5 会：① 去掉这次折平；② 给 actor/critic 加 GNN；
-            # ③ 把**冻结的起点图**喂给想象轨迹（论文要求，见 networks_imagine）。
-            start = {k: flatten(v) for k, v in start.items()}
 
         def step(prev, _):
             state, _, _ = prev
             feat = dynamics.get_feat(state)
             inp = feat.detach()
-            action = policy(inp).sample()
-            succ = dynamics.img_step(state, action)
+            # [CoDreamer] ★ 想象阶段的两个通信点，都用**同一张冻结的起点图** ★
+            #
+            # ① actor 自己的 GNN（论文 Table 3：Actor-Critic GNN Layers = 1）
+            # ② RSSM 的 GNN。这一条尤其重要：世界模型是**带着图**训练的，若想象时
+            #    不喂图，它看到的隐状态就处于分布外，整条想象轨迹系统性偏差。
+            #    （缺了它时，CoDreamer 的 Phase 2 会完全涨不动 —— 因为它的世界模型
+            #     学到的东西在想象里被抽掉了。）
+            action = policy(inp, graph=graph).sample()
+            succ = dynamics.img_step(state, action, graph=graph)
             return succ, feat, action
 
         succ, feats, actions = tools.static_scan(
@@ -497,13 +525,16 @@ class ImagBehavior(nn.Module):
 
         return feats, states, actions
 
-    def _compute_target(self, imag_feat, imag_state, reward):
+    def _compute_target(self, imag_feat, imag_state, reward, graph=None):
         if "cont" in self._world_model.heads:
             inp = self._world_model.dynamics.get_feat(imag_state)
-            discount = self._config.discount * self._world_model.heads["cont"](inp).mean
+            discount = (
+                self._config.discount
+                * self._world_model.heads["cont"](inp, graph=graph).mean
+            )
         else:
             discount = self._config.discount * torch.ones_like(reward)
-        value = self.value(imag_feat).mode()
+        value = self.value(imag_feat, graph=graph).mode()
         target = tools.lambda_return(
             reward[1:],
             value[:-1],
@@ -524,10 +555,11 @@ class ImagBehavior(nn.Module):
         target,
         weights,
         base,
+        graph=None,
     ):
         metrics = {}
         inp = imag_feat.detach()
-        policy = self.actor(inp)
+        policy = self.actor(inp, graph=graph)
         # Q-val for actor is not transformed using symlog
         # [CoDreamer] 上游这里是 `target = torch.stack(target, dim=1)`：因为旧的
         # lambda_return 返回的是沿 batch 维 unbind 出的元组。现在它直接返回带时间轴
@@ -550,12 +582,12 @@ class ImagBehavior(nn.Module):
             # （(T,B,N) -> (T,B,1,N)）。`[..., None]` 对三维输入完全等价。
             actor_target = (
                 policy.log_prob(imag_action)[:-1][..., None]
-                * (target - self.value(imag_feat[:-1]).mode()).detach()
+                * (target - self.value(imag_feat[:-1], graph=graph).mode()).detach()
             )
         elif self._config.imag_gradient == "both":
             actor_target = (
                 policy.log_prob(imag_action)[:-1][..., None]
-                * (target - self.value(imag_feat[:-1]).mode()).detach()
+                * (target - self.value(imag_feat[:-1], graph=graph).mode()).detach()
             )
             mix = self._config.imag_gradient_mix
             actor_target = mix * target + (1 - mix) * actor_target

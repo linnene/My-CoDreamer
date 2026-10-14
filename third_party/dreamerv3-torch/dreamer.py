@@ -165,10 +165,16 @@ class Dreamer(nn.Module):
         # 登记于 docs/reproduction-plan.md「改动清单」。
         if update_behavior:
             start = post
+            # [CoDreamer] 取出图并扁平化。`_imagine` 会把隐状态的 (B,T) 合并成轨迹维，
+            # 所以图的 (B,T) 必须做同样处理，两者才对得上。
+            # 同一份扁平图既给 reward 头（它也有 GNN），也给 ImagBehavior。
+            graph = models.flatten_graph(
+                models.graph_from_data(data, self._config.device)
+            )
             reward = lambda f, s, a: self._wm.heads["reward"](
-                self._wm.dynamics.get_feat(s)
+                self._wm.dynamics.get_feat(s), graph=graph
             ).mode()
-            metrics.update(self._task_behavior._train(start, reward)[-1])
+            metrics.update(self._task_behavior._train(start, reward, graph=graph)[-1])
             if self._config.expl_behavior != "greedy":
                 mets = self._expl_behavior.train(start, context, data)[-1]
                 metrics.update({"expl_" + key: value for key, value in mets.items()})
