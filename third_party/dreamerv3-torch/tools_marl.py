@@ -508,6 +508,13 @@ def simulate_marl(
             logger.scalar("eval_episodes", len(eval_scores))
             logger.write(step=logger.step)
             eval_done = True
+            # [CoDreamer] 把逐局分数挂到 logger 上。
+            #
+            # 上面只记了均值，而部署评测需要**分布**（箱线图、中位数、四分位距）。
+            # 不另加返回值是为了不动 simulate_marl 与 main() 之间的 7 元组约定。
+            # scripts/eval_policy.py 读这个属性。
+            logger.eval_scores = list(eval_scores)
+            logger.eval_lengths = list(eval_lengths)
 
     if is_eval:
         # 评测时只留最后一条，供 video_pred 使用

@@ -459,6 +459,11 @@ def main(config):
                 {
                     "agent_state_dict": agent.state_dict(),
                     "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+                    # [CoDreamer] 把解析后的 config 也存进去。
+                    # 没有它，事后无法重建模型 —— 光看 metrics.jsonl 推不出
+                    # gnn_layers / 环境规格这些关键超参，只好靠人手抄命令行，
+                    # 极易与训练时不一致。scripts/eval_policy.py 依赖这一项。
+                    "config": vars(config),
                 },
                 logdir / "cutoff.pt",
             )
@@ -501,6 +506,8 @@ def main(config):
         items_to_save = {
             "agent_state_dict": agent.state_dict(),
             "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+            # [CoDreamer] 同上：存下 config 以便事后重建模型做部署评测
+            "config": vars(config),
         }
         torch.save(items_to_save, logdir / "latest.pt")
 
