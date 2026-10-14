@@ -214,7 +214,13 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `configs.yaml` | `codreamer` 块增加 `seg_*` 环境规格键（`num_agents` / `horizon` / `num_actions` / `edge_density` / `local_state_ratio` / `target_transform` / `obs_mode` / `graph_obs`）。每个键都会自动变成命令行参数 | 跨步对比 + 步骤 2 | `# [CoDreamer]` |
 | `configs.yaml` | `encoder`/`decoder` 的 `mlp_keys` 由 `.*` 改为 `^(?!adjacency$)(?!edge_features$).*`，把图拓扑（邻接矩阵行、边特征行）挡在 encoder/decoder 之外 —— 它们只给 GNN 用，不是要编码/重建的特征。默认（`seg_graph_obs: false`）下行为与 `.*` 完全一致 | 步骤 2 | `# [CoDreamer]` |
 | `configs.yaml` | `batch_size` 改为 8：图批次下它的单位是**队伍数**，论文 B=16 在 12GB 上会 OOM（实测 12 队可行、16 队不行） | 步骤 2 | `# [CoDreamer]` |
-| `models.py` | 新增 `fold_agent_axis`；`_train` 开头把 `(B,T,N,·)` 折成 `(B*N,T,·)` | 步骤 2 | `# [CoDreamer]` |
+| `tools.py` | `SymlogDist.log_prob` 的归约由 `sum(range(len(shape))[2:])` 改为 `sum(-1)`：前者把"第 2 维之后全部"归约掉，多智能体下会把 agent 轴也加掉（loss 从 (B,T,N) 变成 (B,T)，与 kl_loss 对不上）。本类只用于向量观测，event 恒为 1 维，故归约末维与上游等价 | 步骤 2 | `# [CoDreamer]` |
+| `networks.py` | `RSSM.__init__` 新增 `gnn_layers` / `gnn_edge_dim` / `gnn_heads`，建一个 `GraphAggregator`；`img_step` 在 **GRU 之后**做邻域聚合（唯一同时通向 prior 与 posterior 的咽喉点）；`observe` / `obs_step` / `imagine_with_action` 多一路 `graph` 参数 | 步骤 2 | `# [CoDreamer]` |
+| `networks.py` | `RSSM.initial` 接受 int 或形状元组（上游只取 `len(is_first)`，会丢掉 agent 轴）；`obs_step` 的 `is_first[:, None]` 改为 `unsqueeze(-1)`（前者在位置 1 插轴，`(B,N)` 下得到 `(B,1,N)` 无法广播）；"全部重置"的判断由 `len(is_first)` 改为 `numel()` | 步骤 2 | `# [CoDreamer]` |
+| `models.py` | `_train` 不再折平 agent 轴（整条链路都只对末维操作，折平反而让 agent 彼此不可见）；新增 `graph_from_data`；两处 `assert shape == embed.shape[:2]` 改为按自身维数对齐 | 步骤 2 | `# [CoDreamer]` |
+| `models.py` | `WorldModel.__init__` 把 `gnn_layers` / 边特征维度（取自 `edge_features` 的末维）/ `gnn_heads` 传给 RSSM | 步骤 2 | `# [CoDreamer]` |
+| `models.py` | `ImagBehavior._imagine` **临时**把 agent 轴也折进 batch（upstream 的 `lambda_return` 末尾写死 `reshape([shape[0], shape[1], 1])`，带 agent 轴改动面很大）。**步骤 5 要取消这一步**，同时给 AC 加 GNN 并把冻结的起点图喂给想象轨迹 | 步骤 2（临时） | `# [CoDreamer]` |
+| `configs.yaml` | 新增 `gnn_layers`（默认 0 = IDreamer）与 `gnn_heads` | 步骤 2 | `# [CoDreamer]` |
 | `dreamer.py` | `main()` 多智能体时改用 `tools_marl.make_graph_dataset` 构造训练集；`video_pred_log` 与之互斥（未适配会直接报错） | 步骤 2 | `# [CoDreamer]` |
 
 新增文件（不在上游清单里，因此不影响"清单不一致 ⟺ 真改了"这个不变式）：
