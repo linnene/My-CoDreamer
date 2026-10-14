@@ -109,12 +109,30 @@ _AGENT_ID_SEP = "--"
 def parse_agent_episode_id(name: str) -> tuple[str, int]:
     """从 episode 的键还原 (team_id, agent_index)。
 
-    `tools.load_episodes` 用**文件名去扩展名**作键，而 save_episodes 的命名是
-    `{episode_id}-{长度}.npz`，故完整的键是 `{team_id}--a{k}--{长度}`。
+    `tools.load_episodes` 用**文件名去扩展名**作键，而 `save_episodes` 的命名是
+    `{episode_id}-{长度}.npz`。把 episode_id = `{team_id}--a{k}` 代进去，完整的键是：
 
-    旧格式（步骤 1 写的，单横线分隔）无法可靠拆分，会直接报 ValueError ——
-    那些数据本来也没有图结构，被 `team_groups` 跳过即可。
+        {team_id}--a{k}-{长度}
+
+    注意两个分隔符**不一样**：team_id 与 agent 片段之间是双横线（我们自己加的），
+    而 agent 片段与长度之间是单横线（save_episodes 加的）。所以先按双横线切成
+    两段，再把后半段按最后一个单横线切开。
+
+    旧格式（步骤 1 写的，team_id-a{k}-{len}）无法无歧义地拆分，会直接报
+    ValueError —— 那些数据本来也没有图结构，被 team_groups 跳过即可。
     """
+    parts = str(name).split(_AGENT_ID_SEP)
+    if len(parts) != 2:
+        raise ValueError(f"not an agent-episode key: {name!r}")
+    team_id, tail = parts
+    agent_tag, sep, _length = tail.rpartition("-")
+    if not sep or not agent_tag.startswith("a"):
+        raise ValueError(f"not an agent-episode key: {name!r}")
+    try:
+        agent_index = int(agent_tag[1:])
+    except ValueError as e:
+        raise ValueError(f"not an agent-episode key: {name!r}") from e
+    return team_id, agent_index
     parts = str(name).split(_AGENT_ID_SEP)
     if len(parts) != 3 or not parts[1].startswith("a"):
         raise ValueError(f"not an agent-episode key: {name!r}")
@@ -557,18 +575,22 @@ def _self_test() -> None:
             tid, ai = None, None
         if tid is not None:
             check("agent_episode_id 与 save_episodes 命名自洽",
-                  f"{agent_episode_id(tid, ai)}-{spec.horizon + 1}" == stem,
-                  f"{agent_episode_id(tid, ai)}-{spec.horizon + 1} vs {stem}")
+                  stem == f"{agent_episode_id(tid, ai)}-{spec.horizon + 1}",
+                  f"期望 {agent_episode_id(tid, ai)}-{spec.horizon + 1}，实际 {stem}")
+            check("team_id 不含双横线（分隔符无歧义）", "--" not in tid, tid)
         check("旧格式（单横线）报 ValueError",
               _raises(lambda: parse_agent_episode_id("20260101T000000-deadbeef-a0-6")))
         check("乱字符串报 ValueError",
               _raises(lambda: parse_agent_episode_id("garbage")))
+        check("缺 agent 段报 ValueError",
+              _raises(lambda: parse_agent_episode_id("20260101T000000-deadbeef--6")))
 
         # --- 组队：完整队伍才保留
         eps = {}
         for f in sorted(pathlib.Path(tmp).glob("*.npz")):
             with f.open("rb") as fh:
-                eps[f.stem] = {k: fh[k] for k in fh.keys()}
+                arr = np.load(fh)
+                eps[f.stem] = {k: arr[k] for k in arr.keys()}
         groups = team_groups(eps, n)
         check("team_groups 归出 2 个完整队", len(groups) == 2, f"{len(groups)}")
         check("每队恰好 N 个 agent",
@@ -603,7 +625,8 @@ def _self_test() -> None:
         epsi = {}
         for f in sorted(pathlib.Path(tmp).glob("*.npz")):
             with f.open("rb") as fh:
-                epsi[f.stem] = {k: fh[k] for k in fh.keys()}
+                arr = np.load(fh)
+                epsi[f.stem] = {k: arr[k] for k in arr.keys()}
         any_key = next(iter(epsi))
         check("graph_obs 写进了 replay", "adjacency" in epsi[any_key],
               str(sorted(epsi[any_key].keys())))
