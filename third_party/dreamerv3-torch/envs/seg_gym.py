@@ -61,8 +61,6 @@ one-hot agent index
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import gym
 import numpy as np
 
