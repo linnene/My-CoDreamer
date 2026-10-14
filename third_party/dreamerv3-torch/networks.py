@@ -118,28 +118,33 @@ class RSSM(nn.Module):
             )
 
     def initial(self, batch_size):
-        deter = torch.zeros(batch_size, self._deter, device=self._device)
+        # [CoDreamer] batch_size 可以是 int（单智能体，上游写法），也可以是形状
+        # 元组（多智能体时是 (B, N)）—— agent 轴是**样本内部**的一维，不是 batch。
+        # 上游写死 `len(is_first)` 只取首维，会把 agent 轴弄丢，导致 deter 与 embed
+        # 维数对不上。
+        shape = (batch_size,) if isinstance(batch_size, int) else tuple(batch_size)
+        deter = torch.zeros(*shape, self._deter, device=self._device)
         if self._discrete:
             state = dict(
                 logit=torch.zeros(
-                    [batch_size, self._stoch, self._discrete], device=self._device
+                    *shape, self._stoch, self._discrete, device=self._device
                 ),
                 stoch=torch.zeros(
-                    [batch_size, self._stoch, self._discrete], device=self._device
+                    *shape, self._stoch, self._discrete, device=self._device
                 ),
                 deter=deter,
             )
         else:
             state = dict(
-                mean=torch.zeros([batch_size, self._stoch], device=self._device),
-                std=torch.zeros([batch_size, self._stoch], device=self._device),
-                stoch=torch.zeros([batch_size, self._stoch], device=self._device),
+                mean=torch.zeros(*shape, self._stoch, device=self._device),
+                std=torch.zeros(*shape, self._stoch, device=self._device),
+                stoch=torch.zeros(*shape, self._stoch, device=self._device),
                 deter=deter,
             )
         if self._initial == "zeros":
             return state
         elif self._initial == "learned":
-            state["deter"] = torch.tanh(self.W).repeat(batch_size, 1)
+            state["deter"] = torch.tanh(self.W).repeat(*shape, 1)
             state["stoch"] = self.get_stoch(state["deter"])
             return state
         else:
@@ -230,17 +235,24 @@ class RSSM(nn.Module):
         return dist
 
     def obs_step(self, prev_state, prev_action, embed, is_first, sample=True, graph=None):
+        # [CoDreamer] 前置形状：单智能体是 (B,)，多智能体是 (B, N)。
+        # initial / prev_action 必须按**完整**前置形状构造 —— 上游用 len(is_first)
+        # 只取首维，多智能体下会丢掉 agent 轴，GRU 的 deter 与 embed 就对不上。
+        lead_shape = tuple(is_first.shape)
         # initialize all prev_state
-        if prev_state == None or torch.sum(is_first) == len(is_first):
-            prev_state = self.initial(len(is_first))
+        if prev_state == None or torch.sum(is_first) == is_first.numel():
+            prev_state = self.initial(lead_shape)
             prev_action = torch.zeros(
-                (len(is_first), self._num_actions), device=self._device
+                lead_shape + (self._num_actions,), device=self._device
             )
         # overwrite the prev_state only where is_first=True
         elif torch.sum(is_first) > 0:
-            is_first = is_first[:, None]
-            prev_action *= 1.0 - is_first
-            init_state = self.initial(len(is_first))
+            # 上游用 is_first[:, None]（在位置 1 插入轴）。那个写法要求 is_first
+            # 是 1 维；改成 unsqueeze(-1) 后 1 维行为不变，而多智能体下得到
+            # (B, N, 1)，才能与 (B, N, ·) 的 prev_action / prev_state 广播对齐。
+            is_first = is_first.unsqueeze(-1)
+            prev_action = prev_action * (1.0 - is_first)
+            init_state = self.initial(lead_shape)
             for key, val in prev_state.items():
                 is_first_r = torch.reshape(
                     is_first,
