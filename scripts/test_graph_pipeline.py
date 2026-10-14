@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import pathlib
 import sys
 import tempfile
@@ -130,8 +131,6 @@ def build_batch(config, spec, num_teams: int, batch_length: int, tmpdir: str) ->
 def train_once(config, obs_space, batch, num_agents_override: int, seed: int,
                gnn_layers: int = 0, gnn_head_layers: int = 0) -> dict:
     """在一个全新模型上跑一次 _train，返回 (损失指标, 参数量)。"""
-    import copy
-
     cfg = copy.deepcopy(config)
     cfg.num_agents = num_agents_override
     cfg.gnn_layers = gnn_layers
