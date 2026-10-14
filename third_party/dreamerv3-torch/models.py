@@ -30,7 +30,11 @@ def fold_agent_axis(data):
             f"expected (B, T, N, ...) for folding, got {key}={value.shape}"
         )
         b, t, n = value.shape[:3]
-        out[key] = value.reshape((b * n, t) + value.shape[3:])
+        # 必须先转置再 reshape。(B,T,N,·) 在内存里 T 与 N 是交错的，直接 reshape
+        # 成 (B*N,T,·) 会得到错位的垃圾。先换成 (B,N,T,·) 再合并前两维才是对的。
+        # （这一步曾经写错，被 scripts/test_graph_pipeline.py 的顺序断言抓到。）
+        perm = (0, 2, 1) + tuple(range(3, value.ndim))
+        out[key] = value.transpose(perm).reshape((b * n, t) + value.shape[3:])
     return out
 
 

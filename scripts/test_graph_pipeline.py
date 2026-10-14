@@ -138,7 +138,8 @@ def train_once(config, obs_space, batch, num_agents_override: int, seed: int) ->
     cfg.compile = False
     tools.set_seed_everywhere(seed)
     wm = models.WorldModel(obs_space, _DummyActSpace(), 0, cfg)
-    mets = wm._train(dict(batch))
+    # WorldModel._train 返回 (post, context, metrics)，取第三个
+    _post, _context, mets = wm._train(dict(batch))
     return mets
 
 
@@ -183,10 +184,24 @@ def main() -> int:
     check("adjacency (B,T,N,N) -> (B*N,T,N)", folded["adjacency"].shape == (b * n, t, n), str(folded["adjacency"].shape))
     # 折平不能改变数值，只能改形状
     check("折平不改变数值总和", np.isclose(folded["state"].sum(), batch["state"].sum()))
-    # 行主序：折平后第 (i*N+j) 行必须是第 i 队第 j 个 agent
-    check("折平的顺序是 team-major / agent-minor",
-          np.array_equal(folded["state"][2 * n + 1], batch["state"][2, :, 1]),
-          "index (2*N+1) 应等于 team 2 的 agent 1")
+    # 行主序：折平后第 (i*N+j) 行必须是第 i 队第 j 个 agent。
+    # 全量枚举，因为"少了转置"这类错误只会弄乱一部分位置，抽查一个下标不一定能碰到。
+    order_ok = all(
+        np.array_equal(folded["state"][i * n + j], batch["state"][i, :, j])
+        for i in range(b)
+        for j in range(n)
+    )
+    check("折平顺序 team-major / agent-minor（全量枚举）", order_ok,
+          "每个 (i*N+j) 都必须等于 team i 的 agent j")
+    check(
+        "折平顺序对 reward/adjacency 同样成立",
+        all(
+            np.array_equal(folded["reward"][i * n + j], batch["reward"][i, :, j])
+            and np.array_equal(folded["adjacency"][i * n + j], batch["adjacency"][i, :, j])
+            for i in range(b)
+            for j in range(n)
+        ),
+    )
 
     print("\n[3] 真实模型：折平路径 vs 图路径，损失必须逐位相同")
     mets_graph = train_once(config, obs_space, batch, n, args.seed)
