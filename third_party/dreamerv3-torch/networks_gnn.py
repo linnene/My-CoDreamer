@@ -243,7 +243,7 @@ def _self_test() -> None:
     A[0, 1] = A[1, 0] = 1
     A[1, 2] = A[2, 1] = 1
     A = A.expand(B, T, N, N).contiguous()
-    E = (torch.rand(B, T, N, N, Fe) * (A > 0)).contiguous()
+    E = (torch.rand(B, T, N, N, Fe) * (A > 0).unsqueeze(-1)).contiguous()
 
     # --- 0 层必须是严格恒等
     agg0 = GraphAggregator(F, layers=0, edge_dim=Fe)
