@@ -29,6 +29,24 @@
 对齐。`--episodes` 的单位与 `eval_episode_num` 相同，是 **agent 局数**：
 一队 N 个 agent 同时结束算 N 局。
 
+================================================================================
+不确定度按【队伍】聚合，不是按 agent
+================================================================================
+同一队的 N 个 agent 共享环境状态与邻接关系，连奖励都是同一份团队奖励。
+它们的回报**不是独立样本** —— 直接把 N×T 个 agent 局当样本算置信区间，
+区间会被算得过窄（相当于把同一个观测重复计了 N 遍）。
+
+所以逐局分数先按队伍求均值，再在**队伍**上算均值的 95% 置信区间。
+对外报告的口径（`mean` / `ci`）一律是队伍级；`agent_mean` 等保留原来的
+agent 级口径，供与旧结果对照。
+
+================================================================================
+配对比较的前提：种子必须一致
+================================================================================
+配对差值只有在于两个 checkpoint 跑的是**同一批局**时才成立。局序列由
+`config.seed + id` 决定，所以这里会**断言**所有 checkpoint 的 seed 相同；
+不同就直接报错，而不是默默给出一个无效的配对结论。
+
 用法::
 
     python scripts/eval_policy.py \\
@@ -147,23 +165,55 @@ def evaluate(agent, config, episodes: int, device: str) -> dict:
         raise SystemExit(
             "没有收到任何评测分数 —— 检查 episodes 是否 >= 一个队伍里的 agent 数"
         )
-    return {
-        "scores": scores,
-        "n": int(scores.size),
-        "mean": float(scores.mean()),
-        "std": float(scores.std(ddof=1)) if scores.size > 1 else 0.0,
-        "median": float(np.median(scores)),
-        "q1": float(np.percentile(scores, 25)),
-        "q3": float(np.percentile(scores, 75)),
-        "min": float(scores.min()),
-        "max": float(scores.max()),
-        # 均值的 95% 置信区间（正态近似）
-        "ci": (
-            1.96 * float(scores.std(ddof=1)) / np.sqrt(scores.size)
-            if scores.size > 1
-            else 0.0
-        ),
-    }
+
+    # [CoDreamer] 按队伍聚合。
+    #
+    # 同一队的 N 个 agent 共享环境状态与邻接关系，连奖励都是同一份团队奖励，
+    # 所以它们是**相关样本**。把 N×T 个 agent 局当独立样本算置信区间，相当于
+    # 把同一个观测重复计了 N 遍 —— 区间会窄到 sqrt(N) 倍。
+    team_ids = np.asarray(getattr(logger, "eval_team_ids", []))
+    if team_ids.size == scores.size and scores.size > 0:
+        team_order = list(dict.fromkeys(team_ids.tolist()))
+        team_scores = np.array(
+            [scores[team_ids == t].mean() for t in team_order], dtype=np.float64
+        )
+    else:
+        # 拿不到队 id（旧版 rollout 或非多智能体环境）就退化成 agent 级。
+        # 明确标出来，避免下游把窄区间当真。
+        team_order = None
+        team_scores = scores
+
+    def stats(a):
+        a = np.asarray(a, dtype=np.float64)
+        return {
+            "n": int(a.size),
+            "mean": float(a.mean()),
+            "std": float(a.std(ddof=1)) if a.size > 1 else 0.0,
+            "median": float(np.median(a)),
+            "q1": float(np.percentile(a, 25)),
+            "q3": float(np.percentile(a, 75)),
+            "min": float(a.min()),
+            "max": float(a.max()),
+            # 均值的 95% 置信区间（正态近似）
+            "ci": (
+                1.96 * float(a.std(ddof=1)) / np.sqrt(a.size) if a.size > 1 else 0.0
+            ),
+        }
+
+    out = stats(team_scores)
+    out["unit"] = "team" if team_order is not None else "agent"
+    out["n_teams"] = len(team_order) if team_order is not None else int(scores.size)
+    # 逐 agent 的原始分数：箱线图与散点图用（看分布形状）。
+    # 统计量（mean / ci / median）一律用上面的队伍级分数。
+    out["scores"] = scores
+    out["team_scores"] = team_scores
+    if team_order is not None:
+        out["team_ids"] = team_order
+        # 保留 agent 级口径供与旧结果对照
+        agent_stats = stats(scores)
+        out["agent_mean"] = agent_stats["mean"]
+        out["agent_ci"] = agent_stats["ci"]
+    return out
 
 
 def parse_checkpoints(items: list[str]) -> list[tuple[str, pathlib.Path]]:
@@ -227,67 +277,99 @@ def main() -> int:
     def config_key(cfg):
         """模型结构相关的超参。变了就必须重建模型。"""
         return (
-            cfg.task, cfg.gnn_layers, cfg.gnn_head_layers, cfg.gnn_heads,
+            cfg.task, cfg.comm_variant,
+            cfg.gnn_layers, cfg.gnn_head_layers, cfg.gnn_behavior_layers,
+            cfg.gnn_heads,
             cfg.seg_num_agents, cfg.seg_graph_obs, cfg.seg_num_actions,
             cfg.seg_horizon, cfg.dyn_stoch, cfg.dyn_deter, cfg.units,
         )
 
     results = []
+    seeds = set()
     for name, path in checkpoints:
         ckpt = load_checkpoint(path, args.device)
         cfg = argparse.Namespace(**ckpt["config"])
         cfg.device = args.device
         cfg.eval_episode_num = args.episodes
+        seeds.add(cfg.seed)
 
         key = config_key(cfg)
         if key != active_key:
             if agent is not None:
                 print(
-                    f"  -- config 变化（gnn={cfg.gnn_layers} "
-                    f"head={cfg.gnn_head_layers}）-> 重建模型"
+                    f"  -- config 变化（{cfg.comm_variant}: rssm={cfg.gnn_layers} "
+                    f"head={cfg.gnn_head_layers} behavior={cfg.gnn_behavior_layers}）"
+                    f"-> 重建模型"
                 )
             agent = build_agent(cfg, args.device)
             n_params = sum(p.numel() for p in agent.parameters())
             active_key = key
             print(
-                f"  模型     rssm_gnn={cfg.gnn_layers}  head_gnn={cfg.gnn_head_layers}  "
-                f"参数量 {n_params:,}"
+                f"  模型     {cfg.comm_variant}  rssm_gnn={cfg.gnn_layers}  "
+                f"head_gnn={cfg.gnn_head_layers}  "
+                f"behavior_gnn={cfg.gnn_behavior_layers}  "
+                f"参数量 {n_params:,}（含 value 的 EMA 副本 _slow_value，"
+                f"所以不能直接与论文表对照）"
             )
 
-        missing, unexpected = agent.load_state_dict(ckpt["agent_state_dict"], strict=False)
-        real_missing = [k for k in missing if not k.startswith("_")]
-        if real_missing:
+        # [CoDreamer] ★ 严格加载 ★
+        #
+        # 这里曾经写的是：
+        #     missing, unexpected = agent.load_state_dict(..., strict=False)
+        #     real_missing = [k for k in missing if not k.startswith("_")]
+        # Dreamer 的子模块叫 _wm / _task_behavior，**每一个真参数的键都以 _ 开头**，
+        # 于是这个过滤器把全部缺失键都筛掉了 —— 校验恒为空，永远不报错。
+        # 结构不匹配时会默默用随机权重评测。现在任何 missing / unexpected 都直接失败。
+        incompatible = agent.load_state_dict(ckpt["agent_state_dict"], strict=False)
+        if incompatible.missing_keys or incompatible.unexpected_keys:
             raise SystemExit(
-                f"{path} 的权重与当前 config 不匹配，缺 {len(real_missing)} 个键："
-                f"{real_missing[:5]}..."
+                f"{path} 的权重与当前模型结构不匹配。\n"
+                f"  缺 {len(incompatible.missing_keys)} 个键: "
+                f"{incompatible.missing_keys[:6]}\n"
+                f"  多 {len(incompatible.unexpected_keys)} 个键: "
+                f"{incompatible.unexpected_keys[:6]}\n"
+                f"  模型的 comm_variant={cfg.comm_variant} "
+                f"gnn=(rssm {cfg.gnn_layers}, head {cfg.gnn_head_layers}, "
+                f"behavior {cfg.gnn_behavior_layers})。\n"
+                f"  拒绝用随机权重继续评测。"
             )
-        if unexpected:
-            print(f"  [警告] {name}: 多出 {len(unexpected)} 个键被忽略")
         agent.eval()
         r = evaluate(agent, cfg, args.episodes, args.device)
         r["name"] = name
         r["path"] = str(path)
         results.append(r)
+        extra = ""
+        if "agent_mean" in r:
+            extra = f"  (agent 级口径 {r['agent_mean']:+.4f} ± {r['agent_ci']:.4f})"
         print(
-            f"  {name:<20s} n={r['n']:<5d} 均值 {r['mean']:+.4f} ± {r['ci']:.4f}  "
+            f"  {name:<20s} 队={r['n_teams']:<4d} agent={r['n']:<5d} "
+            f"均值 {r['mean']:+.4f} ± {r['ci']:.4f}  "
             f"中位数 {r['median']:+.4f}  IQR [{r['q1']:+.3f}, {r['q3']:+.3f}]  "
-            f"[{r['min']:+.3f}, {r['max']:+.3f}]"
+            f"[{r['min']:+.3f}, {r['max']:+.3f}]{extra}"
+        )
+
+    # [CoDreamer] 配对比较的前提是同一批局。局序列由 config.seed + id 决定，
+    # seed 不同就不是同一批局，配对差值无意义 —— 直接拒绝，不给无效结论。
+    if len(seeds) > 1:
+        raise SystemExit(
+            f"各 checkpoint 的训练 seed 不同（{sorted(seeds)}），跑的不是同一批局，"
+            f"配对比较无效。请只比较同一次训练的不同 checkpoint。"
         )
 
     print()
 
     if len(results) > 1:
         print()
-        print("  两两对比（同一批局，配对差值）：")
+        print("  两两对比（同一批局，配对差值；按【队伍】配对，不是按 agent）：")
         base = results[0]
         for other in results[1:]:
-            d = other["scores"] - base["scores"]
-            # 配对：同一批局，所以直接看逐局差值
+            d = other["team_scores"] - base["team_scores"]
+            # 配对：同一批局，所以直接看逐队差值
             se = d.std(ddof=1) / np.sqrt(d.size) if d.size > 1 else 0.0
             print(
                 f"    {other['name']} − {base['name']}: "
                 f"均值差 {d.mean():+.4f} ± {1.96 * se:.4f}  "
-                f"（逐局看：{int((d > 0).sum())}/{d.size} 局更好）"
+                f"（逐队看：{int((d > 0).sum())}/{d.size} 队更好）"
             )
 
     if args.out:
@@ -302,7 +384,10 @@ def main() -> int:
                 {
                     r["name"]: {
                         "path": r["path"],
+                        "unit": r["unit"],
+                        "n_teams": r["n_teams"],
                         "scores": r["scores"].tolist(),
+                        "team_scores": r["team_scores"].tolist(),
                         "mean": r["mean"],
                         "median": r["median"],
                         "q1": r["q1"],

@@ -121,15 +121,20 @@ powershell -ExecutionPolicy Bypass -File scripts\run_smoke.ps1   # Windows
 cd third_party/dreamerv3-torch
 
 # IDreamer —— agent 之间不通信
-python dreamer.py --configs codreamer --seg_graph_obs True --gnn_layers 0 \
+python dreamer.py --configs codreamer --comm_variant idreamer --seg_graph_obs True \
     --logdir ~/runs/idreamer
 
-# CoDreamer —— RSSM 内 1 层 GNN
-python dreamer.py --configs codreamer --seg_graph_obs True --gnn_layers 1 \
+# CoDreamer —— RSSM / 预测头 / actor-critic 各 1 层 GNN（论文 Table 2/3）
+python dreamer.py --configs codreamer --comm_variant codreamer --seg_graph_obs True \
     --logdir ~/runs/codreamer
 ```
 
-`gnn_layers` 是两个变体之间的唯一开关。
+**`comm_variant` 是两个变体之间唯一的日常开关。** 它同时驱动三处 GNN，避免
+出现"半个 CoDreamer"：只打开 RSSM 而关着头与 actor-critic，得到的既不是论文的
+CoDreamer，也不是 IDreamer。
+
+想跑单点消融时，`--gnn_layers` / `--gnn_head_layers` / `--gnn_behavior_layers`
+可以逐个覆盖 `comm_variant`（三处不一致时会打印警告）。
 
 ### 监控与可视化
 

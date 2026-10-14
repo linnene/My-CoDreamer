@@ -222,15 +222,24 @@ codreamer:
   # --- GNN（CoDreamer 与 IDreamer 的唯一区别）----------------------------------
   # 论文 Table 2：RSSM GNN Layers = 1，Reward & Cont GNN Layers = 1
   # 论文 Table 3：Actor-Critic GNN Layers = 1
-  # 0 层 = 严格恒等 = IDreamer。这是两个变体之间的开关，改它必须两边都跑一遍。
-  gnn_layers: 0        # RSSM 里插几层（论文 1）
-  gnn_heads: 1         # GATv2 的注意力头数（论文未给，取 1）
-  gnn_head_layers: 0   # reward / cont 预测头里插几层（论文 1）
-                       # 位置：作用在头的 512 维隐层上，而不是 1536 维的输入上
-                       # （5·d² 在 1536 维是 1180 万参数，不可能）。
-                       # decoder 头**永远不插**（论文明确要求）。
-  gnn_behavior_layers: 0   # actor / critic 里插几层（论文 Table 3：GNN Layers 1）
+  #
+  # ★ 单一开关 ★  CoDreamer 与 IDreamer 的差别散布在**三处**独立的 GNN 上，
+  # 用三个开关分别控制极易跑出"半个 CoDreamer"（README 就曾经把它写成
+  # "唯一开关"，是错的）。所以日常实验只改这一个键：
+  #     --comm_variant idreamer   三处全 0（严格恒等）
+  #     --comm_variant codreamer  三处全 1（论文 Table 2/3）
+  # 下面三个键的默认值 -1 = "跟随 comm_variant"；显式给非负值可以覆盖它做消融。
+  # main() 在建模型之前展开它们，并把展开后的值写进 checkpoint。
+  comm_variant: 'idreamer'
+  gnn_layers: -1           # RSSM 里插几层（论文 1）
+  gnn_heads: 1             # GATv2 的注意力头数（论文未给，取 1）
+  gnn_head_layers: -1      # reward / cont 预测头里插几层（论文 1）
+                           # 位置：作用在头的 512 维隐层上，而不是 1536 维的输入上
+                           # （5·d² 在 1536 维是 1180 万参数，不可能）。
+                           # decoder 头**永远不插**（论文明确要求）。
+  gnn_behavior_layers: -1  # actor / critic 里插几层（论文 Table 3：GNN Layers 1）
                            # 想象阶段用**冻结的起点图**（论文要求，不重新预测）
+                           # 执行阶段也必须带图 —— 见 Dreamer._policy
 
   # --- Phase 2：环境切断（想象辅助训练）-----------------------------------------
   # 前 imagination_after_frac 比例的训练正常（环境供数据）；之后**彻底切断环境**，

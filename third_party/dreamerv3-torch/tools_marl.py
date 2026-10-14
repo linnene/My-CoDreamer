@@ -392,6 +392,12 @@ def simulate_marl(
 
     eval_scores: list[float] = []
     eval_lengths: list[int] = []
+    # [CoDreamer] 每个分数属于哪支队伍。
+    #
+    # 同一队的 N 个 agent 共享环境状态和邻接关系，它们的回报**不是独立样本**。
+    # 直接把 N×T 个 agent episode 当样本算置信区间会把区间算得过窄。
+    # 下游（scripts/eval_policy.py）用这个 id 先按队聚合再估计不确定性。
+    eval_team_ids: list[str] = []
     eval_done = False
 
     while (steps and step < steps) or (episodes and episode < episodes):
@@ -476,6 +482,7 @@ def simulate_marl(
                         ep = cache[agent_episode_id(team_ids[i], k)]
                         eval_lengths.append(len(ep["reward"]) - 1)
                         eval_scores.append(float(np.array(ep["reward"]).sum()))
+                        eval_team_ids.append(team_ids[i])
                 else:
                     for k in range(n_agents):
                         key = agent_episode_id(team_ids[i], k)
@@ -515,6 +522,7 @@ def simulate_marl(
             # scripts/eval_policy.py 读这个属性。
             logger.eval_scores = list(eval_scores)
             logger.eval_lengths = list(eval_lengths)
+            logger.eval_team_ids = list(eval_team_ids)
 
     if is_eval:
         # 评测时只留最后一条，供 video_pred 使用

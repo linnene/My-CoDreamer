@@ -72,11 +72,17 @@ class Dreamer(nn.Module):
                 else self._should_train(step)
             )
             for _ in range(steps):
-                # [CoDreamer] 预训练阶段只更新世界模型（见 _train 的说明）
+                # [CoDreamer] 预训练阶段只更新世界模型（见 _train 的说明）。
+                #
+                # ⚠️ 这里曾经写成 `not (pretraining or self._world_model_frozen)`。
+                # 预训练时两个开关于是**同时**为 False —— 那 500 步变成 500 次不更新
+                # 任何参数的前向，日志却照旧打印"预训练完成"。冻结世界模型是 Phase 2
+                # 的独立开关，与预训练毫无关系，不该混进同一个表达式。
+                # 由 scripts/test_training_loop.py 盯死。
                 self._train(
                     next(self._dataset),
                     update_behavior=not pretraining,
-                    update_world_model=not (pretraining or self._world_model_frozen),
+                    update_world_model=not self._world_model_frozen,
                 )
                 self._update_count += 1
                 self._metrics["update_count"] = self._update_count
@@ -112,18 +118,35 @@ class Dreamer(nn.Module):
             latent, action = state
         obs = self._wm.preprocess(obs)
         embed = self._wm.encoder(obs)
-        latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"])
+        # [CoDreamer] ★ 执行路径也必须拿到图 ★
+        #
+        # 曾经只有训练路径（_train -> _imagine）传图，_policy 这里一个字都没提。
+        # 后果是：收集数据用的动作来自一个看不见图的 actor，而世界模型是带着图训练
+        # 的；部署评测也评的是看不见图的策略。CoDreamer 于是从未在真实执行中使用通信。
+        # 采集时 simulate_marl 把每队 (N,·) 拼成 (batch,·)，所以这里 adjacency 的形状
+        # 正好是 (batch, N, N)，与 img_step 里 GNN 要求的形状一致。
+        # 由 scripts/test_training_loop.py 盯死。
+        graph = models.graph_from_data(obs, self._config.device)
+        latent, _ = self._wm.dynamics.obs_step(
+            latent, action, embed, obs["is_first"], graph=graph
+        )
         if self._config.eval_state_mean:
             latent["stoch"] = latent["mean"]
         feat = self._wm.dynamics.get_feat(latent)
         if not training:
-            actor = self._task_behavior.actor(feat)
+            actor = self._task_behavior.actor(feat, graph=graph)
             action = actor.mode()
         elif self._should_expl(self._step):
-            actor = self._expl_behavior.actor(feat)
+            # 探索策略（Random / Plan2Explore）与任务策略不是同一个网络，它们的
+            # actor 不接受 graph 参数。`greedy` 时 _expl_behavior 就是 _task_behavior，
+            # 必须走带图的那一条，否则同一个网络会有两种输入分布。
+            if self._config.expl_behavior == "greedy":
+                actor = self._task_behavior.actor(feat, graph=graph)
+            else:
+                actor = self._expl_behavior.actor(feat)
             action = actor.sample()
         else:
-            actor = self._task_behavior.actor(feat)
+            actor = self._task_behavior.actor(feat, graph=graph)
             action = actor.sample()
         logprob = actor.log_prob(action)
         latent = {k: v.detach() for k, v in latent.items()}
@@ -278,8 +301,51 @@ def make_env(config, mode, id):
     return env
 
 
+def resolve_comm_variant(config):
+    """[CoDreamer] 把单一开关 `comm_variant` 展开到三处 GNN 的层数上。
+
+    CoDreamer 与 IDreamer 的差别散布在**三处**独立的 GNN 上（RSSM / 预测头 /
+    actor-critic），而它们各自默认关闭。于是 `--gnn_layers 1` 只能得到"半个
+    CoDreamer"——README 曾经把它写成"两个变体之间的唯一开关"，是错的。
+
+         idreamer  -> 三处全 0（严格恒等）
+         codreamer -> 三处全 1（论文 Table 2/3 全为 1 层）
+
+    单独设 gnn_layers / gnn_head_layers / gnn_behavior_layers 可以覆盖它（做消融
+    用）；它们的 yaml 默认值是 -1，意思是"跟随 comm_variant"。本函数**必须**在
+    建模型之前调用，否则 checkpoint 里存的 config 是没展开的。
+
+    抽成独立函数是为了让 scripts/test_training_loop.py 能调同一份逻辑，
+    而不是在测试里复制一遍（复制出来的东西会和真代码逐渐分家）。
+    """
+    if config.comm_variant not in ("idreamer", "codreamer"):
+        raise SystemExit(
+            f"comm_variant 只能是 'idreamer' 或 'codreamer'，收到 {config.comm_variant!r}"
+        )
+    n = {"idreamer": 0, "codreamer": 1}[config.comm_variant]
+    for key in ("gnn_layers", "gnn_head_layers", "gnn_behavior_layers"):
+        if getattr(config, key) < 0:
+            setattr(config, key, n)
+    state = (config.gnn_layers, config.gnn_head_layers, config.gnn_behavior_layers)
+    if len(set(state)) != 1:
+        print(
+            "[CoDreamer][警告] 三处 GNN 层数不一致 "
+            f"(rssm={state[0]}, head={state[1]}, behavior={state[2]}) —— "
+            "这不是标准的 CoDreamer/IDreamer 对照，请确认这是你想要的消融。"
+        )
+    print(
+        f"[CoDreamer] comm_variant={config.comm_variant}  "
+        f"gnn: rssm={config.gnn_layers} head={config.gnn_head_layers} "
+        f"behavior={config.gnn_behavior_layers}"
+    )
+    return config
+
+
 def main(config):
     tools.set_seed_everywhere(config.seed)
+    # [CoDreamer] ★ 单一变体开关 ★ —— 见 resolve_comm_variant 的说明。
+    resolve_comm_variant(config)
+
     if config.deterministic_run:
         tools.enable_deterministic_run()
     logdir = pathlib.Path(config.logdir).expanduser()
