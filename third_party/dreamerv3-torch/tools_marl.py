@@ -778,12 +778,14 @@ def _self_test() -> None:
         ret = simulate_imagination(
             pol4, envs4, cache4, tmp, logger4, limit=10**6, steps=6, state=res4
         )
+        # 必须在 with 块**内**统计 —— 出了块临时目录就被删了，glob 会数出 0
+        files_after = len(list(pathlib.Path(tmp).glob("*.npz")))
 
     check("想象阶段不产生新 episode", len(cache4) == n_eps_before,
           f"{n_eps_before} -> {len(cache4)}")
     check("想象阶段不改变 dataset_size", count_dataset_size(cache4) == size_before)
-    check("想象阶段不写新 npz",
-          len(list(pathlib.Path(tmp).glob("*.npz"))) == files_before)
+    check("想象阶段不写新 npz", files_after == files_before,
+          f"{files_before} -> {files_after}")
     check("想象阶段按节奏调用 agent（ceil(steps/n_teams)=6）",
           pol4.step_count - calls_before == 6, f"{pol4.step_count - calls_before}")
     check("想象阶段传入的 obs 是 None", pol4.last_obs_was_none)
