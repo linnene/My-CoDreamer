@@ -278,14 +278,14 @@ def section_execution_graph(tmp: pathlib.Path) -> None:
                 g is not None and tuple(g[0].shape) == (batch, n, n),
                 f"得到 {None if g is None else tuple(g[0].shape)}",
             )
-            # 每支队伍的那一块必须等于它自己的邻接矩阵
+            # 每支队伍的那一块必须等于它自己的邻接矩阵。
+            # 输出是 (batch, N, N) = (n_teams*N, N, N)，先读作 (n_teams, N, N, N)，
+            # 再取队内任意一个 agent（它们必须完全相同）。
             n_teams = batch // n
-            ok = True
-            for t in range(n_teams):
-                base = obs["adjacency"].reshape(n_teams, n, n)[t]
-                blk = g[0].numpy().reshape(n_teams, n, n)[t]
-                ok = ok and np.array_equal(base, blk)
-            check("同一队的 N 个 agent 拿到同一张完整矩阵", ok)
+            expect = obs["adjacency"].reshape(n_teams, n, n)
+            got = g[0].numpy().reshape(n_teams, n, n, n)
+            ok = all(np.array_equal(expect[t], got[t, k]) for t in range(n_teams) for k in range(n))
+            check("同一队的 N 个 agent 拿到同一张完整矩阵（且等于原矩阵）", ok)
 
             # 翻一条有向边。adjacency 是 2 维 (batch, N)，批里每个 agent 各占一行。
             adj0 = np.asarray(obs["adjacency"], dtype=np.float32).copy()
