@@ -346,10 +346,10 @@ def main() -> int:
             torch.allclose(
                 new_g[:, :, j],
                 _old_lambda_return(
-                    nr[1:, :, j].unsqueeze(-1),
-                    nv[:-1, :, j].unsqueeze(-1),
-                    npc[1:, :, j].unsqueeze(-1),
-                    nv[-1, :, j].unsqueeze(-1),
+                    nr[1:, :, j, 0].unsqueeze(-1),
+                    nv[:-1, :, j, 0].unsqueeze(-1),
+                    npc[1:, :, j, 0].unsqueeze(-1),
+                    nv[-1, :, j, 0].unsqueeze(-1),
                     0.95,
                 ),
             )
