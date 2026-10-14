@@ -551,6 +551,8 @@ def main() -> int:
         print("      ✓ 数据管线 (B,T,N,·) 与展平路径等价（相对误差在 float32 机器精度量级）")
         print("      ✓ GNN 已接入 RSSM 的 GRU 咽喉点，开/关确实改变计算结果")
         print("      ✓ reward / cont 头接了通信，而 decoder 逐位不受影响")
+        print("      ✓ actor / critic 各自一层 GNN；想象阶段用冻结的起点图")
+        print("      ✓ 关闭全部 GNN 时，改图不影响任何数值")
 
     print("=" * 74)
     if FAILURES:

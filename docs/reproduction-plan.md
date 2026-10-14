@@ -224,6 +224,14 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `networks.py` | `MLP` 新增 `gnn_layers` / `gnn_edge_dim` / `gnn_heads`，在 **self.layers 的隐层输出**上做邻域聚合（不是头的 1536 维输入 —— GATv2 是 5·d²，那里是 1180 万参数）；`forward` 多一路 `graph` 参数 | 步骤 2 | `# [CoDreamer]` |
 | `models.py` | reward / cont 两个头接 GNN；新增 `_comm_heads`。**decoder 不接** —— 论文："only the reward and terminal state prediction heads use communication, while the decoder head remains independent" | 步骤 2 | `# [CoDreamer]` |
 | `configs.yaml` | 新增 `gnn_head_layers`（默认 0；论文 Table 2 = 1） | 步骤 2 | `# [CoDreamer]` |
+| `models.py` | 新增 `flatten_graph`（(B,T,N,N)->(B*T,N,N)，与 `_imagine` 对隐状态的合并方式一致）；`WorldModel` 暴露 `edge_dim` 供 AC 建自己的 GNN | 步骤 2 | `# [CoDreamer]` |
+| `models.py` | `ImagBehavior` 的 actor / critic 各加一层 GNN（论文 Table 3）；`_train` / `_imagine` / `_compute_target` / `_compute_actor_loss` 全部多一路 `graph` | 步骤 2 | `# [CoDreamer]` |
+| `models.py` | **取消** `_imagine` 里对 agent 轴的临时折平（步骤 3 留下的）。`:imagine` 现在把**冻结的起点图**传给 actor 与 `img_step`，整段轨迹复用同一张图（论文明确要求不重新预测邻接矩阵） | 步骤 2 | `# [CoDreamer]` |
+| `dreamer.py` | `_train` 取出图、用 `flatten_graph` 扁平化，同一份图既给 reward 头也给 `ImagBehavior` | 步骤 2 | `# [CoDreamer]` |
+| `configs.yaml` | 新增 `gnn_behavior_layers`（默认 0；论文 Table 3 = 1） | 步骤 2 | `# [CoDreamer]` |
+| `tools.py` / `models.py` | `lambda_return` 改为返回张量 `(time, *batch, 1)`（不再返回元组），两处 `torch.stack(target, dim=1)` 随之删除；两处 `[:, :, None]` 改为 `[..., None]`；`axis!=0` 明确报错 | 步骤 2 | `# [CoDreamer]` |
+| `dreamer.py` | `__call__` 新增 `collect_policy`；`_train` 新增 `update_world_model`；新增 `set_world_model_frozen`；循环后补一次评测；切断时存 `cutoff.pt`；checkpoint 里附带 `config` | 步骤 2 | `# [CoDreamer]` |
+| `tools_marl.py` | 新增 `simulate_imagination`（Phase 2：环境切断后只推进训练节奏）与 `count_dataset_size` | 步骤 2 | `# [CoDreamer]` |
 | `dreamer.py` | `main()` 多智能体时改用 `tools_marl.make_graph_dataset` 构造训练集；`video_pred_log` 与之互斥（未适配会直接报错） | 步骤 2 | `# [CoDreamer]` |
 
 新增文件（不在上游清单里，因此不影响"清单不一致 ⟺ 真改了"这个不变式）：
