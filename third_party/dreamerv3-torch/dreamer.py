@@ -453,6 +453,16 @@ def main(config):
                 f"世界模型{'冻结' if config.imagination_freeze_world_model else '继续在冻结的 replay 上训练'}。"
                 f"此后不再有新的环境数据。"
             )
+            # 存下切断时刻的策略。否则 latest.pt 每轮被覆盖，事后无法区分
+            # "切断时的策略"与"最终策略" —— 而那正是本实验要比较的一对。
+            torch.save(
+                {
+                    "agent_state_dict": agent.state_dict(),
+                    "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
+                },
+                logdir / "cutoff.pt",
+            )
+            print(f"[CoDreamer] 已保存切断时刻的 checkpoint: {logdir / 'cutoff.pt'}")
         logger.scalar("env_cutoff", 1.0 if env_cutoff else 0.0)
 
         if env_cutoff:
@@ -493,6 +503,14 @@ def main(config):
             "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
         }
         torch.save(items_to_save, logdir / "latest.pt")
+
+    # [CoDreamer] 尾巴上再写一次。
+    #
+    # 上游把 logger.write() 放在循环**顶部**，于是最后一轮迭代产生的一切
+    # （eval_return、dataset_size、env_cutoff、dataset_size_drift）都写不出去。
+    # 本实验恰好最关心尾部（Phase 2 整段都在后半），所以必须补这一次刷新。
+    logger.write()
+
     for env in train_envs + eval_envs:
         try:
             env.close()
