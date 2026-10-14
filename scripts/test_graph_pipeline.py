@@ -341,11 +341,17 @@ def main() -> int:
           tuple(new_g.shape) == (5, 3, gn, 1), str(tuple(new_g.shape)))
     check(
         "逐 agent 切开（喂旧实现）结果一致",
+        # 旧实现只接受 3 维；把每个 agent 切片成 (time, batch, 1) 再喂
         all(
             torch.allclose(
                 new_g[:, :, j],
-                _old_lambda_return(nr[1:, :, j:j + 1], nv[:-1, :, j:j + 1],
-                                   npc[1:, :, j:j + 1], nv[-1, :, j:j + 1], 0.95),
+                _old_lambda_return(
+                    nr[1:, :, j].unsqueeze(-1),
+                    nv[:-1, :, j].unsqueeze(-1),
+                    npc[1:, :, j].unsqueeze(-1),
+                    nv[-1, :, j].unsqueeze(-1),
+                    0.95,
+                ),
             )
             for j in range(gn)
         ),
