@@ -453,6 +453,10 @@ def main() -> int:
         c.gnn_layers = g_layers
         c.gnn_behavior_layers = b_layers
         c.gnn_head_layers = h_layers
+        # critic 的输出层默认用 outscale=0 初始化（权重全零），于是 .mode() 与输入
+        # 无关 —— 那样就永远测不出"GNN 接没接上"。本节关心的是接线而不是初始化，
+        # 所以临时打开 scale，使 critic 非退化。（训练路径仍用配置里的值。）
+        c.critic = dict(c.critic, outscale=1.0)
         c.device = "cpu"
         c.precision = 32
         c.compile = False
@@ -491,14 +495,23 @@ def main() -> int:
     adj1[..., 2, 0] = adj1[..., 0, 2]
 
     with torch.no_grad():
+        # ★ 每次调用前都要重新播种 ★
+        #
+        # `_imagine` 里 `policy(inp, graph=...).sample()` 是**采样**的：即使输入完全
+        # 相同，两次调用也会因为 RNG 状态不同而分岔。不播种的话，"关掉 GNN 时图
+        # 不应影响任何东西" 这条会被采样噪声冲掉（实测差 1.17）。
+        tools.set_seed_everywhere(args.seed)
         f_a, _, _ = imag_on._imagine(start, imag_on.actor, horizon, graph=(adj0, edge0))
+        tools.set_seed_everywhere(args.seed)
         f_b, _, _ = imag_on._imagine(start, imag_on.actor, horizon, graph=(adj1, edge0))
         d_on = float((f_a - f_b).abs().max())
         check("开了 GNN：改图会改变想象的轨迹（图确实传进了 img_step）",
               d_on > 1e-6, f"max|\u0394|={d_on:.3e}")
 
         start0 = wm_off.dynamics.initial((b, t, n))
+        tools.set_seed_everywhere(args.seed)
         g_a, _, _ = imag_off._imagine(start0, imag_off.actor, horizon, graph=(adj0, edge0))
+        tools.set_seed_everywhere(args.seed)
         g_b, _, _ = imag_off._imagine(start0, imag_off.actor, horizon, graph=(adj1, edge0))
         d_off = float((g_a - g_b).abs().max())
         check("关掉 GNN：改图**完全不影响**任何东西（图不漏进 IDreamer）",
