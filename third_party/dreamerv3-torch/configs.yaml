@@ -230,6 +230,19 @@ codreamer:
                        # （5·d² 在 1536 维是 1180 万参数，不可能）。
                        # decoder 头**永远不插**（论文明确要求）。
 
+  # --- Phase 2：环境切断（想象辅助训练）-----------------------------------------
+  # 前 imagination_after_frac 比例的训练正常（环境供数据）；之后**彻底切断环境**，
+  # 策略只能靠世界模型的想象轨迹继续提升。
+  #
+  # 验收的硬证据：切断后 metrics.jsonl 里的 dataset_size 必须一直不变，
+  # 且 dataset_size_drift 恒为 0。任何变化都说明环境没收干净。
+  imagination_only: false
+  imagination_after_frac: 0.5
+  # 切断后世界模型是否冻结（变体 A/B）：
+  #   true  —— 冻结 WM，只训策略 → 测"这个 WM 够不够好"
+  #   false —— WM 继续在**冻结的 replay** 上训练（仍不接触环境）→ 更宽松的设定
+  imagination_freeze_world_model: false
+
   # --- Sequential Estimate Game 的环境规格（默认值 = 论文 Table 1）-------------
   # 这几个键的意义是做横向对比实验：找出"通信真正有用"的配置区间。
   # 所有键都会自动变成命令行参数，例如 --seg_obs_mode oracle。

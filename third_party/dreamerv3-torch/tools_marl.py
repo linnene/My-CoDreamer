@@ -70,9 +70,11 @@ from tools import (
 
 __all__ = [
     "agent_episode_id",
+    "count_dataset_size",
     "make_graph_dataset",
     "parse_agent_episode_id",
     "sample_episode_graphs",
+    "simulate_imagination",
     "simulate_marl",
     "team_groups",
 ]
@@ -286,6 +288,68 @@ def _split_action(action, n_teams: int, n_agents: int):
     return out
 
 
+def count_dataset_size(cache: dict) -> int:
+    """缓存里现在有多少条 transition（**不删除任何东西**）。
+
+    用途：Phase 2（环境已切断）里反复调用它，值一旦变化就说明有新数据进来 ——
+    这是"确实没碰环境"的直接证据。
+
+    计数口径与 `tools.erase_over_episodes` 一致：每条 episode 贡献 `len(reward) - 1`。
+    """
+    return sum(len(ep["reward"]) - 1 for ep in cache.values())
+
+
+def simulate_imagination(
+    agent,
+    envs,
+    cache,
+    directory,
+    logger,
+    is_eval=False,
+    limit=None,
+    steps=0,
+    episodes=0,
+    state=None,
+):
+    """想象阶段（Phase 2）：**完全不接触环境**，只让策略在 WM 的想象里继续训。
+
+    为什么还要"假"地调 agent：训练节奏由 `agent._step` 与 `_should_train` 驱动，
+    而 `_step` 只在 `Dreamer.__call__` 里按 batch 推进。绕开 __call__ 直接调 _train
+    会把梯度更新频率改掉，Phase 2 就没法和 Phase 1 比。所以这里按**与
+    simulate_marl 完全相同的节奏**调用它，只是把策略前向跳掉（collect_policy=False）。
+
+    返回一个与 simulate_marl 同形的 7 元组，这样 main() 里的 `state = collect(...)`
+    不用改成两套写法（元组第 5 项就是 agent 的状态）。
+
+    ⚠️ 证据：跑这段时 `dataset_size` 必须**一个数都不变** —— 这是"确实没碰环境"的硬证据。
+    """
+    if not envs:
+        raise ValueError("need at least one env")
+    n_teams = len(envs)
+    n_agents = envs[0].num_agents
+    batch = n_teams * n_agents
+
+    # simulate_marl 的循环是 `while step < steps: step += n_teams`，
+    # 所以迭代次数是 ceil(steps / n_teams)。要保持同样的训练节奏就必须一致。
+    n_iter = int(np.ceil(steps / n_teams)) if steps else 0
+
+    reset = np.zeros(batch, dtype=bool)
+    agent_state = state[5] if state is not None else None
+    for _ in range(n_iter):
+        # obs 传 None：collect_policy=False 时不会用到它
+        _, agent_state = agent(None, reset, agent_state, collect_policy=False)
+
+    return (
+        0,                          # step - steps
+        0,                          # episode - episodes
+        np.ones(n_teams, bool),
+        np.zeros(n_teams, np.int32),
+        [None] * n_teams,
+        agent_state,
+        [0] * n_teams,
+    )
+
+
 def simulate_marl(
     agent,
     envs,
@@ -480,15 +544,19 @@ class _FakePolicy:
         self.calls = []
         self.step_count = 0
 
-    def __call__(self, obs, done, state):
-        self.calls.append((obs["state"].shape[0], done.shape[0]))
-        batch = obs["state"].shape[0]
+    def __call__(self, obs, done, state, collect_policy=True):
+        # collect_policy=False 时 obs 必须是 None（Phase 2 的想象阶段不产生动作）
+        self.last_obs_was_none = obs is None
+        self.calls.append((None if obs is None else obs["state"].shape[0], done.shape[0]))
+        batch = done.shape[0]
         onehot = np.zeros((batch, self.num_actions), dtype=np.float32)
         idx = self.rng.integers(0, self.num_actions, batch)
         onehot[np.arange(batch), idx] = 1.0
         self.step_count += 1
         # 模拟 Dreamer 的 state 传递
         new_state = ({"dummy": np.zeros(batch)}, onehot)
+        if not collect_policy:
+            return {}, state
         return {"action": onehot, "logprob": np.zeros(batch, dtype=np.float32)}, new_state
 
 
@@ -691,6 +759,38 @@ def _self_test() -> None:
     check("评测模式记录 eval_return", "eval_return" in logger3.scalars,
           str(list(logger3.scalars)))
     check("评测模式 episode 数 = N", len(logger3.scalars.get("eval_episodes", [])) == 1)
+
+    # --- Phase 2：simulate_imagination 必须完全不碰环境
+    envs4 = [SequentialEstimateGameEnv(spec, seed=11)]
+    cache4: dict = {}
+    logger4 = _FakeLogger()
+    pol4 = _FakePolicy(spec.num_actions, seed=4)
+    with tempfile.TemporaryDirectory() as tmp:
+        # 先正常收一季度，让 cache 里有数据、agent_state 有值
+        res4 = simulate_marl(pol4, envs4, cache4, tmp, logger4, limit=10**6,
+                             steps=spec.horizon)
+        agent_state = res4[5]
+        n_eps_before = len(cache4)
+        size_before = count_dataset_size(cache4)
+        files_before = len(list(pathlib.Path(tmp).glob("*.npz")))
+        calls_before = pol4.step_count
+
+        ret = simulate_imagination(
+            pol4, envs4, cache4, tmp, logger4, limit=10**6, steps=6, state=res4
+        )
+
+    check("想象阶段不产生新 episode", len(cache4) == n_eps_before,
+          f"{n_eps_before} -> {len(cache4)}")
+    check("想象阶段不改变 dataset_size", count_dataset_size(cache4) == size_before)
+    check("想象阶段不写新 npz",
+          len(list(pathlib.Path(tmp).glob("*.npz"))) == files_before)
+    check("想象阶段按节奏调用 agent（ceil(steps/n_teams)=6）",
+          pol4.step_count - calls_before == 6, f"{pol4.step_count - calls_before}")
+    check("想象阶段传入的 obs 是 None", pol4.last_obs_was_none)
+    check("返回值与 simulate_marl 同形（7 元组）", len(ret) == 7 and ret[5] is not None)
+    check("想象阶段不增加 logger 的 dataset_size 记录",
+          "dataset_size" not in logger4.scalars or
+          logger4.scalars["dataset_size"][-1] == size_before)
 
     print("-" * 68)
     if failures:

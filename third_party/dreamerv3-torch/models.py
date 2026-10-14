@@ -175,11 +175,15 @@ class WorldModel(nn.Module):
             cont=config.cont_head["loss_scale"],
         )
 
-    def _train(self, data):
+    def _train(self, data, update=True):
         # action (batch_size, batch_length, act_dim)
         # image (batch_size, batch_length, h, w, ch)
         # reward (batch_size, batch_length)
         # discount (batch_size, batch_length)
+        #
+        # [CoDreamer] `update=False` 时只做前向、不跑优化器（供 Phase 2 的
+        # "冻结世界模型"设定使用）。前向仍然必须做：actor-critic 的想象需要
+        # post 作为起点，而且预测损失还要记录下来用于诊断。
         #
         # [CoDreamer] 多智能体时 data 是 (B, T, N, ·)：agent 轴是**样本内部**的一维，
         # 因为 GNN 要在同一时刻对 N 个 agent 做邻域聚合。
@@ -232,7 +236,14 @@ class WorldModel(nn.Module):
                     for key, value in losses.items()
                 }
                 model_loss = sum(scaled.values()) + kl_loss
-            metrics = self._model_opt(torch.mean(model_loss), self.parameters())
+            if update:
+                metrics = self._model_opt(torch.mean(model_loss), self.parameters())
+            else:
+                # [CoDreamer] 冻结：只记损失，不更新参数。用 detach 避免白算梯度。
+                metrics = {
+                    "model_loss": to_np(torch.mean(model_loss).detach()),
+                    "model_grad_norm": 0.0,
+                }
 
         # Store scalar metrics to avoid keeping (batch,time) arrays until the next log step.
         metrics.update(

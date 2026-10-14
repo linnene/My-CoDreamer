@@ -45,6 +45,9 @@ class Dreamer(nn.Module):
         self._step = logger.step // config.action_repeat
         self._update_count = 0
         self._dataset = dataset
+        # [CoDreamer] Phase 2 的变体 A：世界模型冻结，只有策略在想象里训。
+        # 由 main() 在穿过 env 切断点时置为 True（见 Dreamer.set_world_model_frozen）。
+        self._world_model_frozen = False
         self._wm = models.WorldModel(obs_space, act_space, self._step, config)
         self._task_behavior = models.ImagBehavior(config, self._wm)
         if (
@@ -59,7 +62,7 @@ class Dreamer(nn.Module):
             plan2explore=lambda: expl.Plan2Explore(config, self._wm, reward),
         )[config.expl_behavior]().to(self._config.device)
 
-    def __call__(self, obs, reset, state=None, training=True):
+    def __call__(self, obs, reset, state=None, training=True, collect_policy=True):
         step = self._step
         if training:
             pretraining = bool(self._should_pretrain())
@@ -70,7 +73,11 @@ class Dreamer(nn.Module):
             )
             for _ in range(steps):
                 # [CoDreamer] 预训练阶段只更新世界模型（见 _train 的说明）
-                self._train(next(self._dataset), update_behavior=not pretraining)
+                self._train(
+                    next(self._dataset),
+                    update_behavior=not pretraining,
+                    update_world_model=not (pretraining or self._world_model_frozen),
+                )
                 self._update_count += 1
                 self._metrics["update_count"] = self._update_count
             if self._should_log(step):
@@ -82,7 +89,16 @@ class Dreamer(nn.Module):
                     self._logger.video("train_openl", to_np(openl))
                 self._logger.write(fps=True)
 
-        policy_output, state = self._policy(obs, state, training)
+        if collect_policy:
+            policy_output, state = self._policy(obs, state, training)
+        else:
+            # [CoDreamer] Phase 2（想象阶段）：环境已切断，不需要动作。
+            #
+            # 为什么仍然要调 __call__：训练节奏由 self._step 与 _should_train 驱动，
+            # 而 _step 只在这里按 batch 推进（`self._step += len(reset)`）。若绕开它
+            # 直接调 _train，梯度更新频率就会变，Phase 2 与 Phase 1 不再可比。
+            # 这里只是把策略前向跳掉，训练部分原样保留。
+            policy_output = {}
 
         if training:
             self._step += len(reset)
@@ -120,9 +136,18 @@ class Dreamer(nn.Module):
         state = (latent, action)
         return policy_output, state
 
-    def _train(self, data, update_behavior=True):
+    def set_world_model_frozen(self, frozen: bool) -> None:
+        """[CoDreamer] 冻结/解冻世界模型（只影响是否做梯度更新，不影响前向）。
+
+        Phase 2 用它区分两种设定：
+            冻结  —— 测"这个世界模型够不够好"
+            不冻  —— 允许它继续在**冻结的 replay** 上收敛（仍然不接触环境）
+        """
+        self._world_model_frozen = bool(frozen)
+
+    def _train(self, data, update_behavior=True, update_world_model=True):
         metrics = {}
-        post, context, mets = self._wm._train(data)
+        post, context, mets = self._wm._train(data, update=update_world_model)
         metrics.update(mets)
         # [CoDreamer] 预训练阶段跳过 actor-critic 与探索策略。
         #
@@ -383,9 +408,23 @@ def main(config):
         agent._should_pretrain._once = False
 
     # make sure eval will be executed once after config.steps
+    #
+    # [CoDreamer] Phase 2（环境切断）的阀值。
+    #
+    # imagination_after_frac 是占总步数的比例：0.5 = 过一半就切断环境，
+    # 之后策略只能靠世界模型的想象轨迹继续提升。
+    # 注意这是按 agent._step 算的，与 config.steps 同一量纲。
+    imag_threshold = (
+        int(config.steps * config.imagination_after_frac)
+        if config.imagination_only
+        else None
+    )
+    env_cutoff = False
+    dataset_at_cutoff = None
     while agent._step < config.steps + config.eval_every:
         logger.write()
         if config.eval_episode_num > 0:
+            # 评测仍然进行：它只读策略、不产生训练数据，不违背"切断环境"。
             print("Start evaluation.")
             eval_policy = functools.partial(agent, training=False)
             collect(
@@ -400,17 +439,55 @@ def main(config):
             if config.video_pred_log:
                 video_pred = agent._wm.video_pred(next(eval_dataset))
                 logger.video("eval_openl", to_np(video_pred))
-        print("Start training.")
-        state = collect(
-            agent,
-            train_envs,
-            train_eps,
-            config.traindir,
-            logger,
-            limit=config.dataset_size,
-            steps=config.eval_every,
-            state=state,
-        )
+
+        # [CoDreamer] 过了阀值就把环境切断。
+        # logger.scalar("env_cutoff") 写成 0/1，画图时可以直接用它定位竖线。
+        if imag_threshold is not None and not env_cutoff and agent._step >= imag_threshold:
+            env_cutoff = True
+            dataset_at_cutoff = tools_marl.count_dataset_size(train_eps)
+            agent.set_world_model_frozen(config.imagination_freeze_world_model)
+            print(
+                f"[CoDreamer] 环境已切断于 step={agent._step} "
+                f"(阈值 {imag_threshold}，占比 {config.imagination_after_frac}). "
+                f"dataset_size={dataset_at_cutoff}；"
+                f"世界模型{'冻结' if config.imagination_freeze_world_model else '继续在冻结的 replay 上训练'}。"
+                f"此后不再有新的环境数据。"
+            )
+        logger.scalar("env_cutoff", 1.0 if env_cutoff else 0.0)
+
+        if env_cutoff:
+            # Phase 2：只推进训练节奏，不碰环境
+            state = tools_marl.simulate_imagination(
+                agent,
+                train_envs,
+                train_eps,
+                config.traindir,
+                logger,
+                limit=config.dataset_size,
+                steps=config.eval_every,
+                state=state,
+            )
+        else:
+            print("Start training.")
+            state = collect(
+                agent,
+                train_envs,
+                train_eps,
+                config.traindir,
+                logger,
+                limit=config.dataset_size,
+                steps=config.eval_every,
+                state=state,
+            )
+
+        # [CoDreamer] 硬证据：Phase 2 里 dataset_size 必须一直等于切断时的值。
+        # 一旦有空数据进来，这里会立刻把偏差写成标量，画图时一眼能看出来。
+        if dataset_at_cutoff is not None:
+            logger.scalar(
+                "dataset_size_drift",
+                float(tools_marl.count_dataset_size(train_eps) - dataset_at_cutoff),
+            )
+
         items_to_save = {
             "agent_state_dict": agent.state_dict(),
             "optims_state_dict": tools.recursively_collect_optim_state_dict(agent),
