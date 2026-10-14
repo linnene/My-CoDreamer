@@ -511,6 +511,29 @@ def main(config):
         }
         torch.save(items_to_save, logdir / "latest.pt")
 
+    # [CoDreamer] 循环结束后再评测一次。
+    #
+    # 上游靠循环条件 `_step < steps + eval_every` 多跑一轮来保证收尾评测：
+    # 单智能体时每轮 `_step += eval_every`，最后一轮正好是"训完再评"。
+    #
+    # 多智能体下每轮推进的是 `batch × eval_every`（batch = envs × num_agents），
+    # 迭代次数因此少好几倍，很容易刚做完最后一次训练就退出 —— 于是**最后一整段
+    # 训练（往往就是 Phase 2 全部）没有任何评测**。
+    # 这个 bug 的表现很隐：训练日志正常、checkpoint 正常，只是曲线少了一截。
+    # 是靠 plot_phase2.py 的面板 ② 画出来是空的才发现的。
+    if config.eval_episode_num > 0:
+        print("Final evaluation (after the last training block).")
+        eval_policy = functools.partial(agent, training=False)
+        collect(
+            eval_policy,
+            eval_envs,
+            eval_eps,
+            config.evaldir,
+            logger,
+            is_eval=True,
+            episodes=config.eval_episode_num,
+        )
+
     # [CoDreamer] 尾巴上再写一次。
     #
     # 上游把 logger.write() 放在循环**顶部**，于是最后一轮迭代产生的一切

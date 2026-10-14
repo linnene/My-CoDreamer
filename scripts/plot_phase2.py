@@ -105,7 +105,9 @@ def main() -> int:
     import matplotlib.pyplot as plt
 
     n_panels = 4 if deploy else 3
-    fig, axes = plt.subplots(1, n_panels, figsize=(5.2 * n_panels, 4.4))
+    # sharex：① 与 ③ 的横轴范围不同（损失日志会延续到 Phase 2），
+    # 不共享的话两根切断竖线在两图里位置不一致，很容易看错。
+    fig, axes = plt.subplots(1, n_panels, figsize=(5.2 * n_panels, 4.4), sharex=True)
     if n_panels == 1:
         axes = [axes]
 
