@@ -552,10 +552,17 @@ class SymlogDist:
             distance = torch.where(distance < self._tol, 0, distance)
         else:
             raise NotImplementedError(self._dist)
+        # [CoDreamer] 上游写的是 sum(range(len(shape))[2:]) —— 把"第 2 维之后全部"
+        # 归约掉，隐含假设维度是 (batch, time, *event)。多智能体下多了一根 agent 轴，
+        # 变成 (batch, time, agent, *event)，那写法会把 **agent 轴也加掉**，
+        # 损失从 (B,T,N) 变成 (B,T)，与 kl_loss 对不上而报维度错。
+        #
+        # 本类只用于**向量**观测（event 恒为 1 维），所以归约最后一维与上游等价，
+        # 且对 agent 轴安全。（图像走 MSEDist，不受此改动影响。）
         if self._agg == "mean":
-            loss = distance.mean(list(range(len(distance.shape)))[2:])
+            loss = distance.mean([-1])
         elif self._agg == "sum":
-            loss = distance.sum(list(range(len(distance.shape)))[2:])
+            loss = distance.sum(-1)
         else:
             raise NotImplementedError(self._agg)
         return -loss
