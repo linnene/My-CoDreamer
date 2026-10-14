@@ -282,6 +282,15 @@ def main() -> int:
     cfg.num_agents = n
     cfg.gnn_layers = 0
     cfg.gnn_head_layers = 1
+    # ★ 为什么要把 reward 头的 outscale 从 0 改成 1 ★
+    #
+    # reward 头的输出层用 `outscale: 0.0` 初始化（即权重全零），于是 logits 恒为 0
+    # → 预测分布均匀 → 输出与输入**无关**。这对训练本身是正常的（head 要学），
+    # 但会让“头对图有没有响应”这个问题永远得到“没响应”，无论 GNN 接没接上。
+    #
+    # 这里只为行为验收临时打开 scale，使头非退化；参数量与结构检查不受影响。
+    # （真正的训练路径仍用配置里的 outscale=0。）
+    cfg.reward_head = dict(cfg.reward_head, outscale=1.0)
     cfg.device = "cpu"
     cfg.precision = 32
     cfg.compile = False
