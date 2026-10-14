@@ -219,6 +219,13 @@ codreamer:
   # ⚠️ 改这个值必须同时作用于 IDreamer 和 CoDreamer，否则两条曲线不可比。
   batch_size: 8
 
+  # --- GNN（CoDreamer 与 IDreamer 的唯一区别）----------------------------------
+  # 论文 Table 2：RSSM GNN Layers = 1，Reward & Cont GNN Layers = 1
+  # 论文 Table 3：Actor-Critic GNN Layers = 1
+  # 0 层 = 严格恒等 = IDreamer。这是两个变体之间的开关，改它必须两边都跑一遍。
+  gnn_layers: 0        # RSSM 里插几层（论文 1）
+  gnn_heads: 1         # GATv2 的注意力头数（论文未给，取 1）
+
   # --- Sequential Estimate Game 的环境规格（默认值 = 论文 Table 1）-------------
   # 这几个键的意义是做横向对比实验：找出"通信真正有用"的配置区间。
   # 所有键都会自动变成命令行参数，例如 --seg_obs_mode oracle。

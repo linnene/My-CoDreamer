@@ -38,6 +38,27 @@ def fold_agent_axis(data):
     return out
 
 
+# [CoDreamer] 从批次里取出图拓扑。没有图就返回 None（IDreamer 路径）。
+def graph_from_data(data, device=None, dtype=torch.float32):
+    """返回 (adjacency, edge_features) 或 None。
+
+    形状：adjacency (B, T, N, N)，edge_features (B, T, N, N, F)。
+    agent 轴是倒数第二个轴，与数据管线一致。
+
+    没看到 `adjacency` 就返回 None —— 这是一个干净的开关：环境不开图（
+    `seg_graph_obs: false`）时整条链路自动退化成 IDreamer。
+    """
+    if "adjacency" not in data:
+        return None
+    def as_tensor(v):
+        if torch.is_tensor(v):
+            return v.to(device=device, dtype=dtype) if device is not None else v
+        return torch.as_tensor(v, dtype=dtype, device=device)
+    adjacency = as_tensor(data["adjacency"])
+    edge = as_tensor(data["edge_features"]) if "edge_features" in data else None
+    return adjacency, edge
+
+
 class RewardEMA:
     """running mean and std"""
 
@@ -65,6 +86,9 @@ class WorldModel(nn.Module):
         shapes = {k: tuple(v.shape) for k, v in obs_space.spaces.items()}
         self.encoder = networks.MultiEncoder(shapes, **config.encoder)
         self.embed_size = self.encoder.outdim
+        # [CoDreamer] 边特征维度由环境声明（`edge_features` 的最后一维）。
+        # 没开图时就为 0，RSSM 里不建边投影。
+        edge_dim = shapes.get("edge_features", (0,))[-1]
         self.dynamics = networks.RSSM(
             config.dyn_stoch,
             config.dyn_deter,
@@ -81,6 +105,11 @@ class WorldModel(nn.Module):
             config.num_actions,
             self.embed_size,
             config.device,
+            # [CoDreamer] 论文 Table 2：RSSM GNN Layers = 1。
+            # 0 层时 GraphAggregator 是严格恒等，整条链路退化成 IDreamer。
+            gnn_layers=config.gnn_layers,
+            gnn_edge_dim=edge_dim,
+            gnn_heads=config.gnn_heads,
         )
         self.heads = nn.ModuleDict()
         if config.dyn_discrete:
@@ -141,18 +170,21 @@ class WorldModel(nn.Module):
         # reward (batch_size, batch_length)
         # discount (batch_size, batch_length)
         #
-        # [CoDreamer] 多智能体时 data 来自图采样器，形状是 (B, T, N, ·)。
-        # IDreamer 语义下 N 个 agent 互不干扰，折进 batch 与分开训练等价，
-        # 折完之后下面整条链路一行都不用改（见 fold_agent_axis）。
-        if self._config.num_agents > 1:
-            data = fold_agent_axis(data)
+        # [CoDreamer] 多智能体时 data 是 (B, T, N, ·)：agent 轴是**样本内部**的一维，
+        # 因为 GNN 要在同一时刻对 N 个 agent 做邻域聚合。
+        #
+        # 整条链路**不需要折平**：encoder / MLP 头 / decoder / RSSM 的 GRUCell 全部
+        # 只对最后一维做操作，天然支持任意前置维度。折平反而会让 agent 彼此不可见。
+        # （早期版本曾在这里折平，已废弃；fold_agent_axis 现在只给 actor-critic 用。）
         data = self.preprocess(data)
-
+        # [CoDreamer] 图拓扑走旁路：不进 encoder（见 configs.yaml 的 mlp_keys），
+        # 只喂给 RSSM 的 GNN。没有这个 key 就传 None → IDreamer 路径。
+        graph = graph_from_data(data, self._config.device)
         with tools.RequiresGrad(self):
             with torch.cuda.amp.autocast(self._use_amp):
                 embed = self.encoder(data)
                 post, prior = self.dynamics.observe(
-                    embed, data["action"], data["is_first"]
+                    embed, data["action"], data["is_first"], graph=graph
                 )
                 kl_free = self._config.kl_free
                 dyn_scale = self._config.dyn_scale
@@ -160,7 +192,9 @@ class WorldModel(nn.Module):
                 kl_loss, kl_value, dyn_loss, rep_loss = self.dynamics.kl_loss(
                     post, prior, kl_free, dyn_scale, rep_scale
                 )
-                assert kl_loss.shape == embed.shape[:2], kl_loss.shape
+                # [CoDreamer] 原来写死 embed.shape[:2]；多智能体下 loss 比 embed 多
+                # 一维（agent 轴），改成按自身维数对齐。
+                assert kl_loss.shape == embed.shape[: kl_loss.dim()], kl_loss.shape
                 preds = {}
                 for name, head in self.heads.items():
                     grad_head = name in self._config.grad_heads
@@ -174,7 +208,8 @@ class WorldModel(nn.Module):
                 losses = {}
                 for name, pred in preds.items():
                     loss = -pred.log_prob(data[name])
-                    assert loss.shape == embed.shape[:2], (name, loss.shape)
+                    # [CoDreamer] 同上：多智能体时比 embed 多一维 agent 轴
+                    assert loss.shape == embed.shape[: loss.dim()], (name, loss.shape)
                     losses[name] = loss
                 scaled = {
                     key: value * self._scales.get(key, 1.0)
@@ -396,6 +431,22 @@ class ImagBehavior(nn.Module):
         dynamics = self._world_model.dynamics
         flatten = lambda x: x.reshape([-1] + list(x.shape[2:]))
         start = {k: flatten(v) for k, v in start.items()}
+        if self._config.num_agents > 1:
+            # [CoDreamer] ★ 步骤 3 的临时状态 ★
+            #
+            # start 现在是 (B*T, N, ·)：(B,T) 已合成轨迹维，agent 轴保留。
+            # 但 actor-critic 还没接自己的 GNN（论文 Table 3 的 GNN Layers=1），
+            # 而 upstream 的 lambda_return 末尾硬编码了
+            #   reshape([shape[0], shape[1], 1])
+            # 对形状有强假设，同时带 agent 轴会很难改动。
+            #
+            # 所以这里把 agent 轴**也**折进 batch，让 AC 完全走 upstream 的路径
+            # （等价于 IDreamer 的 AC）。世界模型的 GNN 仍然生效 —— 它作用在
+            # img_step 里，不受这个折平影响。
+            #
+            # 步骤 5 会：① 去掉这次折平；② 给 actor/critic 加 GNN；
+            # ③ 把**冻结的起点图**喂给想象轨迹（论文要求，见 networks_imagine）。
+            start = {k: flatten(v) for k, v in start.items()}
 
         def step(prev, _):
             state, _, _ = prev

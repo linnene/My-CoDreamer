@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from torch import distributions as torchd
 
 import tools
+import networks_gnn
 
 
 class RSSM(nn.Module):
@@ -28,6 +29,9 @@ class RSSM(nn.Module):
         num_actions=None,
         embed=None,
         device=None,
+        gnn_layers=0,
+        gnn_edge_dim=0,
+        gnn_heads=1,
     ):
         super(RSSM, self).__init__()
         self._stoch = stoch
@@ -58,6 +62,23 @@ class RSSM(nn.Module):
         self._img_in_layers.apply(tools.weight_init)
         self._cell = GRUCell(self._hidden, self._deter, norm=norm)
         self._cell.apply(tools.weight_init)
+
+        # [CoDreamer] 通信层。
+        #
+        # 位置：GRU **之后**是论文里唯一同时通向 prior 与 posterior 的咽喉点 ——
+        # `obs_step` 把 img_step 的结果既当 prior，又拿它拼 embed 算 posterior，而
+        # `get_feat` 又用 deter 拼出 decoder / actor / critic 共用的特征。在那里插
+        # 一层 GNN，通信信息会自动流到 prior、posterior 和全部下游，无需额外接线。
+        #
+        # 论文 Table 2：RSSM GNN Layers = 1。k=0 时 GraphAggregator 是严格恒等，
+        # 整条链路退化成 IDreamer（这是两个变体之间唯一的开关）。
+        self._gnn = networks_gnn.GraphAggregator(
+            self._deter,
+            layers=gnn_layers,
+            edge_dim=gnn_edge_dim,
+            heads=gnn_heads,
+            norm=norm,
+        )
 
         img_out_layers = []
         inp_dim = self._deter
@@ -124,29 +145,66 @@ class RSSM(nn.Module):
         else:
             raise NotImplementedError(self._initial)
 
-    def observe(self, embed, action, is_first, state=None):
+    def observe(self, embed, action, is_first, state=None, graph=None):
+        """
+        graph: None 或 (adjacency, edge_features)，**带时间轴**：
+            adjacency (B, T, N, N)      edge_features (B, T, N, N, F) 或 None
+
+        agent 轴是倒数第二个轴，与数据管线的 (B, T, N, ·) 一致。
+        """
         swap = lambda x: x.permute([1, 0] + list(range(2, len(x.shape))))
         # (batch, time, ch) -> (time, batch, ch)
         embed, action, is_first = swap(embed), swap(action), swap(is_first)
-        # prev_state[0] means selecting posterior of return(posterior, prior) from obs_step
-        post, prior = tools.static_scan(
-            lambda prev_state, prev_act, embed, is_first: self.obs_step(
-                prev_state[0], prev_act, embed, is_first
-            ),
-            (action, embed, is_first),
-            (state, state),
-        )
+        if graph is None:
+            # [CoDreamer] 无图 = 不通信（IDreamer 路径），与上游逐行一致。
+            # prev_state[0] means selecting posterior of return(posterior, prior) from obs_step
+            post, prior = tools.static_scan(
+                lambda prev_state, prev_act, embed, is_first: self.obs_step(
+                    prev_state[0], prev_act, embed, is_first
+                ),
+                (action, embed, is_first),
+                (state, state),
+            )
+        else:
+            # [CoDreamer] 图同样沿时间扫；agent 轴原样留在时间轴之后
+            adjacency = swap(graph[0])
+            edge = swap(graph[1]) if graph[1] is not None else None
+            post, prior = tools.static_scan(
+                lambda prev_state, prev_act, embed, is_first, adj, ed: self.obs_step(
+                    prev_state[0], prev_act, embed, is_first, graph=(adj, ed)
+                ),
+                (action, embed, is_first, adjacency, edge),
+                (state, state),
+            )
 
         # (batch, time, stoch, discrete_num) -> (batch, time, stoch, discrete_num)
         post = {k: swap(v) for k, v in post.items()}
         prior = {k: swap(v) for k, v in prior.items()}
         return post, prior
 
-    def imagine_with_action(self, action, state):
+    def imagine_with_action(self, action, state, graph=None):
         swap = lambda x: x.permute([1, 0] + list(range(2, len(x.shape))))
         assert isinstance(state, dict), state
         action = swap(action)
-        prior = tools.static_scan(self.img_step, [action], state)
+        if graph is None:
+            prior = tools.static_scan(self.img_step, [action], state)
+        else:
+            # 想象阶段图必须**冻结**（论文："CoDreamer does not predict new adjacency
+            # matrices over the imagined trajectories, the adjacency matrix of the
+            # starting graph is used for all subsequent graphs"）。
+            # 所以把同一张图沿时间轴广播，每一步都用它。
+            n_steps = action.shape[0]
+            adj = graph[0].unsqueeze(0).expand(n_steps, *graph[0].shape)
+            ed = (
+                graph[1].unsqueeze(0).expand(n_steps, *graph[1].shape)
+                if graph[1] is not None
+                else None
+            )
+            prior = tools.static_scan(
+                lambda st, act, a, e: self.img_step(st, act, graph=(a, e)),
+                [action, adj, ed],
+                state,
+            )
         prior = prior[0]
         prior = {k: swap(v) for k, v in prior.items()}
         return prior
@@ -171,7 +229,7 @@ class RSSM(nn.Module):
             )
         return dist
 
-    def obs_step(self, prev_state, prev_action, embed, is_first, sample=True):
+    def obs_step(self, prev_state, prev_action, embed, is_first, sample=True, graph=None):
         # initialize all prev_state
         if prev_state == None or torch.sum(is_first) == len(is_first):
             prev_state = self.initial(len(is_first))
@@ -192,7 +250,7 @@ class RSSM(nn.Module):
                     val * (1.0 - is_first_r) + init_state[key] * is_first_r
                 )
 
-        prior = self.img_step(prev_state, prev_action)
+        prior = self.img_step(prev_state, prev_action, graph=graph)
         x = torch.cat([prior["deter"], embed], -1)
         # (batch_size, prior_deter + embed) -> (batch_size, hidden)
         x = self._obs_out_layers(x)
@@ -205,7 +263,11 @@ class RSSM(nn.Module):
         post = {"stoch": stoch, "deter": prior["deter"], **stats}
         return post, prior
 
-    def img_step(self, prev_state, prev_action, sample=True):
+    def img_step(self, prev_state, prev_action, sample=True, graph=None):
+        """
+        graph: None 或 (adjacency, edge_features)，形状 (B, N, N) / (B, N, N, F)。
+               **不带时间轴** —— 每一步一张图（调用方负责沿时间步提供）。
+        """
         # (batch, stoch, discrete_num)
         prev_stoch = prev_state["stoch"]
         if self._discrete:
@@ -221,6 +283,17 @@ class RSSM(nn.Module):
             # (batch, hidden), (batch, deter) -> (batch, deter), (batch, deter)
             x, deter = self._cell(x, [deter])
             deter = deter[0]  # Keras wraps the state in a list.
+        # [CoDreamer] ★ 通信就发生在这里 ★
+        #
+        # GRUCell 返回的 output 与 state 是**同一个值**（下一行 `return output, [output]`），
+        # 所以改 x 必须同步改 deter —— 否则 prior 里的 deter 不带通信信息，
+        # 而 get_feat 用的正是 deter，通信就白做了。
+        #
+        # 无图或 0 层时整段跳过。GraphAggregator 本身在 0 层也是严格恒等，
+        # 这里的判断只是为了省掉无意义的注意力计算。
+        if graph is not None and self._gnn.num_layers > 0:
+            x = self._gnn(x, graph[0], graph[1])
+            deter = x
         # (batch, deter) -> (batch, hidden)
         x = self._img_out_layers(x)
         # (batch, hidden) -> (batch_size, stoch, discrete_num)
@@ -231,6 +304,10 @@ class RSSM(nn.Module):
             stoch = self.get_dist(stats).mode()
         prior = {"stoch": stoch, "deter": deter, **stats}
         return prior
+
+    @property
+    def gnn_layers(self):
+        return self._gnn.num_layers
 
     def get_stoch(self, deter):
         x = self._img_out_layers(deter)

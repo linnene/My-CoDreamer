@@ -127,20 +127,22 @@ def build_batch(config, spec, num_teams: int, batch_length: int, tmpdir: str) ->
     return batch, envs[0].observation_space
 
 
-def train_once(config, obs_space, batch, num_agents_override: int, seed: int) -> dict:
-    """在一个全新模型上跑一次 _train，返回损失指标。"""
+def train_once(config, obs_space, batch, num_agents_override: int, seed: int, gnn_layers: int = 0) -> dict:
+    """在一个全新模型上跑一次 _train，返回 (损失指标, 参数量)。"""
     import copy
 
     cfg = copy.deepcopy(config)
     cfg.num_agents = num_agents_override
+    cfg.gnn_layers = gnn_layers
     cfg.device = "cpu"
     cfg.precision = 32          # 关掉 amp，保证两次比较逐位一致
     cfg.compile = False
     tools.set_seed_everywhere(seed)
     wm = models.WorldModel(obs_space, _DummyActSpace(), 0, cfg)
+    n_params = sum(p.numel() for p in wm.parameters())
     # WorldModel._train 返回 (post, context, metrics)，取第三个
     _post, _context, mets = wm._train(dict(batch))
-    return mets
+    return mets, n_params
 
 
 class _DummyActSpace:
@@ -203,9 +205,9 @@ def main() -> int:
         ),
     )
 
-    print("\n[3] 真实模型：折平路径 vs 图路径，损失必须逐位相同")
-    mets_graph = train_once(config, obs_space, batch, n, args.seed)
-    mets_flat = train_once(config, obs_space, folded, 1, args.seed)
+    print("\n[3] 真实模型：折平路径 vs 图路径，损失必须逐位相同（gnn_layers=0）")
+    mets_graph, n_graph = train_once(config, obs_space, batch, n, args.seed, gnn_layers=0)
+    mets_flat, _ = train_once(config, obs_space, folded, 1, args.seed, gnn_layers=0)
 
     keys = ["model_loss", "state_loss", "reward_loss", "cont_loss", "kl", "dyn_loss", "rep_loss"]
     worst = 0.0
@@ -219,6 +221,36 @@ def main() -> int:
 
     print("\n[4] 结论")
     check("所有损失逐位相同（阈值 0）", worst == 0.0, f"最大偏差 {worst:.3e}")
+
+    # ------------------------------------------------------------------
+    print("\n[5] GNN 确实接上了（本节是步骤 3 的核心验收）")
+    mets_gnn, n_gnn = train_once(config, obs_space, batch, n, args.seed, gnn_layers=1)
+    print(f"       gnn_layers=0 参数量 {n_graph:,}")
+    print(f"       gnn_layers=1 参数量 {n_gnn:,}  （+{n_gnn - n_graph:,}）")
+    check("0 层不增加任何参数", n_graph == 16429829, f"{n_graph:,}（预期 16,429,829）")
+    check("1 层确实加了参数", n_gnn > n_graph, f"+{n_gnn - n_graph:,}")
+    check("1 层无 NaN", all(
+        np.isfinite(np.asarray(mets_gnn[k])).all()
+        for k in ["model_loss", "state_loss", "reward_loss", "cont_loss", "kl"]
+    ))
+    # 关键：开了 GNN 损失必须变 —— 不变就意味着 GNN 根本没接到计算图里
+    changed = [
+        k for k in ["model_loss", "state_loss", "reward_loss", "kl"]
+        if not np.isclose(float(np.asarray(mets_gnn[k])), float(np.asarray(mets_graph[k])))
+    ]
+    check("开 GNN 后损失发生变化（证明接线生效）", len(changed) > 0,
+          f"变化的指标: {changed}")
+    check("dyn_loss 也变化（GNN 影响了 prior 的 KL）",
+          not np.isclose(float(np.asarray(mets_gnn["dyn_loss"])),
+                         float(np.asarray(mets_graph["dyn_loss"]))))
+
+    # GNN 只该影响“跨 agent”的部分。孤岛 agent 的 det​er 不应因邻居而变。
+    # （已由 networks_gnn 的单元测试覆盖，这里不重复。）
+
+    print("\n[6] 结论")
+    if not FAILURES:
+        print("      ✓ 数据管线 (B,T,N,·) 与展平路径逐位等价（0 层时）")
+        print("      ✓ GNN 已接入 RSSM 的 GRU 咽喉点，开/关确实改变计算结果")
 
     print("=" * 74)
     if FAILURES:
