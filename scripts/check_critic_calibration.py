@@ -146,15 +146,23 @@ def calibrate(path: pathlib.Path, args) -> dict:
             )
             feat = wm.dynamics.get_feat(post)          # (B,T,N,F)
             # 与 _train 一致：feat 保持 (B,T,N,·)，MLP 只动末维、GNN 读倒数第二维
-            v = models._dist_mean(behavior.value(feat, graph=graph))   # (B,T,N)
+            v = models._dist_mean(behavior.value(feat, graph=graph))
+            v = v.reshape(feat.shape[:-1])             # (B,T,N)，强制丢掉头的尾维
 
             # 真实折扣回报：G_t = Σ_{k≥0} γ^k r_{t+k}（终止后不再累加）
             rew = obs["reward"]                        # (B,T,N)
-            cont = obs["cont"]                         # (B,T,N)
+            cont = obs["cont"]
+            if cont.dim() == rew.dim() + 1:
+                cont = cont.squeeze(-1)                # preprocess 给 cont 多补了一维
+            # 显式断言，绝不让广播替我们对齐（本项目在这一点上错过两次）
+            assert rew.shape == v.shape and cont.shape == v.shape, (
+                f"形状对不上：reward {tuple(rew.shape)}  cont {tuple(cont.shape)}  "
+                f"value {tuple(v.shape)}"
+            )
+            B, T, N = rew.shape
             disc = gamma * cont
-            T = rew.shape[1]
             g = torch.zeros_like(v)
-            run = torch.zeros_like(v)
+            run = torch.zeros(B, N, dtype=v.dtype, device=v.device)
             for t in reversed(range(T)):
                 run = rew[:, t] + disc[:, t] * run
                 g[:, t] = run
