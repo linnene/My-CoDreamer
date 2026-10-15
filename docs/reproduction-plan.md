@@ -243,6 +243,15 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `models.py` | `_compute_target` 的 λ-return 自举项可用 `value_bootstrap: 'slow'` 换成慢目标。**上游把在线 critic 同时用作自举与中间混合项**，而慢目标只出现在损失正则里 —— 目标因此没有外部锚。实测症状：`target_mean ≡ value_mean`、V 与真实回报相关 0.03、价值膨胀到每步奖励的 ~1000 倍且不收敛、actor advantage 归零。默认 `'online'` = 与上游逐位一致 | 诊断（2026-10-15） | `# [CoDreamer]` |
 | `configs.yaml` | 新增 `value_bootstrap`（默认 `'online'`） | 诊断（2026-10-15） | `# [CoDreamer]` |
 
+> **⚠️ `value_bootstrap: 'slow'` 已被量测否定，不要指望它修好任何东西。**
+> 实测慢目标与在线 critic 只差 **0.19%（IDreamer）/ 0.56%（CoDreamer）**，
+> 且与真实回报的相关性和在线 critic 一样烂（+0.037 / +0.118）。
+> 它只是延迟约 50 次更新的副本（`slow_target_fraction: 0.02`，而全程约 32000 次更新），
+> **不是锚**。开关保留只为复现这次否定，不是候选修法。
+>
+> 真正的原因用比值表述最清楚：价值目标里自举项 `γ·V ≈ 12.0`，奖励项 `r̄ = 0.012`，
+> **比值约 997:1** —— 目标里 99.9% 是 critic 自己的输出，0.1% 来自环境。
+
 新增文件（不在上游清单里，因此不影响"清单不一致 ⟺ 真改了"这个不变式）：
 
 | 文件 | 作用 |
