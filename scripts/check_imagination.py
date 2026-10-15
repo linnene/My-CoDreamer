@@ -118,8 +118,14 @@ def probe(path: pathlib.Path, args) -> dict:
                     wm.heads["reward"](feat, graph=g0)
                     if "reward" in wm._comm_heads else wm.heads["reward"](feat)
                 ).reshape(feat.shape[:-1])
+                ch = wm.heads["cont"]
+                cont_pred = models._dist_mean(
+                    ch(feat, graph=g0) if "cont" in wm._comm_heads else ch(feat)
+                ).reshape(feat.shape[:-1])
                 rec.append({
                     "k": k,
+                    "cont_mean": float(cont_pred.mean()),
+                    "cont_std": float(cont_pred.std()),
                     "rew_std": float(rew.std()),
                     "rew_absmean": float(rew.abs().mean()),
                     "feat_delta": float((feat - prev).norm(dim=-1).mean()),
@@ -136,7 +142,9 @@ def probe(path: pathlib.Path, args) -> dict:
         for step in r:
             for key in out:
                 out[key].setdefault(step["k"], []).append(step[key])
-    return {k: {kk: float(np.mean(vv)) for kk, vv in v.items()} for k, v in out.items()}
+    res = {k: {kk: float(np.mean(vv)) for kk, vv in v.items()} for k, v in out.items()}
+    res["_gamma"] = float(cfg.discount)
+    return res
 
 
 def main() -> int:
@@ -152,13 +160,13 @@ def main() -> int:
         name, _, path = item.partition("=")
         print(f"\n=== {name} ===")
         r = probe(pathlib.Path(path).expanduser(), args)
-        ks = sorted(r["rew_std"])
+        ks = sorted(k for k in r["rew_std"])
         print(f"  {'k':>3}{'imag_rew_std':>15}{'true_rew_std':>15}{'imag|rew|':>12}"
-              f"{'feat_delta':>13}{'feat_spread':>13}")
+              f"{'feat_delta':>13}{'feat_spread':>13}{'cont_mean':>12}")
         for k in ks:
             print(f"  {k:>3}{r['rew_std'][k]:>15.3e}{r['true_rew_std'][k]:>15.3e}"
                   f"{r['rew_absmean'][k]:>12.3e}{r['feat_delta'][k]:>13.3e}"
-                  f"{r['feat_spread'][k]:>13.3e}")
+                  f"{r['feat_spread'][k]:>13.3e}{r['cont_mean'][k]:>12.4f}")
 
         first, last = ks[0], ks[-1]
         ratio = r["rew_std"][last] / max(r["rew_std"][first], 1e-12)
@@ -166,6 +174,10 @@ def main() -> int:
         print(f"  → 想象奖励的散度 k=1→{last}: {ratio:.3f}×   "
               f"末步 imag/true 散度比: {tratio:.3e}")
         print("     塌缩的判据：散度随 k 单调趋零，且比真实散度小几个数量级")
+        cm = r["cont_mean"][last]
+        g = float(r["_gamma"])
+        print(f"  → cont(k={last}) = {cm:.4f}  → 折扣 γ·cont = {g*cm:.5f}  "
+              f"→ 累积视界 1/(1-γ·cont) ≈ {1.0/max(1e-9, 1-g*cm):.1f} 步")
 
     print("\n" + "=" * 74)
     return 0
