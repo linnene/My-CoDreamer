@@ -296,6 +296,10 @@ codreamer:
   # 默认 0 = 不存（与上游逐位一致）。诊断"某个量随训练怎么变"时必须打开 ——
   # 上游只留 latest.pt、每轮覆盖，事后只剩最终点。单份约 0.2~0.3 GB。
   ckpt_every: 0
+  # [CoDreamer] λ-return 的自举用哪个 critic。
+  # online = 上游行为（在线 critic 出现在自己的目标里，目标因此没有外部锚）
+  # slow   = 换成慢目标，用于判定"价值无锚"这个诊断是否成立
+  value_bootstrap: 'online'
 
 debug:
   debug: True

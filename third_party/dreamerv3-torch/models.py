@@ -696,11 +696,32 @@ class ImagBehavior(nn.Module):
         else:
             discount = self._config.discount * torch.ones_like(reward)
         value = self.value(imag_feat, graph=graph).mode()
+        # [CoDreamer] ★ 自举项用哪个 critic ★
+        #
+        # 上游这里把**在线** critic 同时用作 λ-return 的中间混合项与自举项：
+        #
+        #     target = lambda_return(reward[1:], value[:-1], disc, bootstrap=value[-1])
+        #
+        # 而被训练的就是 `self.value`，于是目标里含着它自己。慢目标 `_slow_value`
+        # 确实存在、也确实在做 Polyak 更新，但**只用在了损失的正则项里**
+        # （见 `_train` 的 `value_loss -= value.log_prob(slow_target...)`），
+        # 从不参与目标计算 —— 低通滤波器不是锚。
+        #
+        # 后果在 2026-10-15 实测到过：target_mean 与 value_mean 逐点相等、
+        # V 与真实折扣回报的相关系数只有 0.03（重测 0.13），价值单调膨胀到
+        # 每步奖励的 ~1000 倍且不收敛，而 actor 的 advantage 随之归零。
+        #
+        # `value_bootstrap: 'slow'` 把自举换成慢目标，用来判定上述诊断是否成立。
+        # 默认 'online' = 与上游逐位一致，不改任何既有结果。
+        if getattr(self._config, "value_bootstrap", "online") == "slow":
+            bootstrap = self._slow_value(imag_feat, graph=graph).mode()
+        else:
+            bootstrap = value
         target = tools.lambda_return(
             reward[1:],
-            value[:-1],
+            bootstrap[:-1],
             discount[1:],
-            bootstrap=value[-1],
+            bootstrap=bootstrap[-1],
             lambda_=self._config.discount_lambda,
             axis=0,
         )

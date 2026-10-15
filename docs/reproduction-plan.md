@@ -240,6 +240,8 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `dreamer.py` | `main()` 多智能体时改用 `tools_marl.make_graph_dataset` 构造训练集；`video_pred_log` 与之互斥（未适配会直接报错） | 步骤 2 | `# [CoDreamer]` |
 | `dreamer.py` | 按 `ckpt_every` 另存带步号的 `ckpt_NNNNNNNNN.pt`。上游只留 `latest.pt` 且每轮覆盖，事后只剩最终点——"某个量随训练怎么变"这条曲线因此永远拿不到。2026-10-15 的诊断正是卡在这里：只有最终 checkpoint，无法判断模型利用是随训练收紧还是保持不动。默认 0 = 不存，行为与上游逐位一致 | 诊断（2026-10-15） | `# [CoDreamer]` |
 | `configs.yaml` | 新增 `ckpt_every`（默认 0） | 诊断（2026-10-15） | `# [CoDreamer]` |
+| `models.py` | `_compute_target` 的 λ-return 自举项可用 `value_bootstrap: 'slow'` 换成慢目标。**上游把在线 critic 同时用作自举与中间混合项**，而慢目标只出现在损失正则里 —— 目标因此没有外部锚。实测症状：`target_mean ≡ value_mean`、V 与真实回报相关 0.03、价值膨胀到每步奖励的 ~1000 倍且不收敛、actor advantage 归零。默认 `'online'` = 与上游逐位一致 | 诊断（2026-10-15） | `# [CoDreamer]` |
+| `configs.yaml` | 新增 `value_bootstrap`（默认 `'online'`） | 诊断（2026-10-15） | `# [CoDreamer]` |
 
 新增文件（不在上游清单里，因此不影响"清单不一致 ⟺ 真改了"这个不变式）：
 
