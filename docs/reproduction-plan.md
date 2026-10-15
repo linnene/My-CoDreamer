@@ -547,3 +547,95 @@ wyb 到 GitHub 的 443 时通时断，`git` 在连不上时的行为**极易骗�
 - `prefill >= 一局长度`（论文设定 500 步），否则攒不出完整队伍
 - `batch_size` 重新标定（仍是"队伍数"，但每队 4~5 agent）
 - 三 seed × 两变体，**主指标开环漂移，回报次要**（论文自己说 VMAS 上回报差异可能是随机性）
+
+---
+
+## 吞吐真相（纠正之前所有相关结论）
+
+### 我之前的错误
+
+我一度判断"有约 3.9 秒/迭代的开销不知去向"，并据此说"算力差两个数量级"。**两个结论都不成立。**
+
+根因是一个口径错误：**`tools.Every.__call__` 返回的是次数，不是布尔**。
+
+```python
+class Every:
+    def __call__(self, step):
+        ...
+        count = int((step - self._last) / self._every)
+        self._last += self._every * count
+        return count          # ← 次数
+```
+
+于是 `batch_steps = batch_size × batch_length`，而
+
+```
+每 _step 单位的更新次数 = 1 / (batch_steps / train_ratio) = train_ratio / batch_steps
+```
+
+**缩小 `batch_size` / `batch_length` 只会让单次更新更便宜、次数按比例变多 ——
+每个 agent 步的总训练量由 `train_ratio` 锁死，完全不变。**
+我把"单次更新 0.057 秒"直接和端到端 fps 比，**漏乘了每次调用里实际的更新次数**
+（实测 32 次），那 3.9 秒根本不存在。
+
+复算：32 × 0.057 = 1.82 s / 次调用，每次调用推进 4 agent 步 → 0.456 s/agent 步
+→ 上限 2.2 agent 步/秒；实测 1.6，**差距 0.17 s/agent 步，完全解释得下**。
+
+### 顺带纠正的另外两个错误（旧 profiler 脚本）
+
+| 错误 | 后果 |
+|---|---|
+| 主循环是 `while agent._step < steps + eval_every`，而我为了"不评测"把 `eval_every` 设成 1e6 | 要跑 **100 万步**，剖析永远不会结束 |
+| `train_ratio` 方向搞反（越大 → 间隔越小 → 更新**越频繁**） | 我那个"关闭训练"的对照组 `train_ratio=1e8`，实际是**最激进**的更新组 |
+
+### 正确的模块级计时（`scripts/prof_vmas.py`）
+
+固定迭代次数、每段 GPU 前后 `torch.cuda.synchronize()`、热身、逐模块：
+
+```
+next(dataset) 采样一个图批次        0.49 ms   cpu
+世界模型 fwd+bwd+opt              51.68 ms   gpu    ← 85%
+actor-critic 想象训练             33.73 ms   gpu
+_policy 前向（执行路径）            2.61 ms   gpu
+VMAS env.step                    4.79 ms   cpu
+save_episodes（写盘）              0.65 ms   io
+──────────────────────────────────────────────
+一次完整训练更新                   88.0 ms
+每个 agent 步（×2 次更新）         176.0 ms
+→ 上限吞吐                       5.68 agent 步/秒
+```
+
+**没有悬空开销**：训练更新占 97%，环境只占 5%。
+
+### 可行性账（`train_ratio=512`，即论文设定）
+
+| 步数 | 单次运行 | 6 次（3 seed × 2 变体） |
+|---|---|---|
+| 5e5（论文） | 24.4 h | **6.1 天** |
+| 1e5 | 4.9 h | 1.2 天 |
+| 2e4 | 1.0 h | 0.2 天 |
+
+**唯一能真正提速的旋钮是 `train_ratio` 本身**（会偏离论文设定；但两个变体用同一
+设定时，对比仍然公平）。批次大小不是旋钮 —— 它被 `train_ratio` 反噬掉了。
+
+### 方法论修正：KL 不能单独作为"世界模型更准"的证据
+
+之前用 `h=16 时 5.9 倍 latent KL` 作为 CoDreamer 世界模型更好的主证据。这个说法
+**过强**：两个模型学的是**各自的 latent space**，KL 的绝对值不可直接横向比较。
+
+更可靠的替代口径（按可信度排序）：
+
+1. **解码后的多步 state MSE**（`openloop_h*_state_mse`，已在日志里）
+2. **reward MAE / continuation 校准**（已在日志里）
+3. 最终任务表现
+
+KL 仍可作为**同一模型内部**随 horizon 漂移的指标，但不该单独用来说明"跨模型更准"。
+
+### Estimate Game 的重新定位
+
+不是"完全放弃"。它不适合比策略回报，但适合做：
+
+- 数据管线回归测试
+- GNN 是否生效的单元环境
+- 世界模型开环诊断
+- IDreamer / CoDreamer 架构消融的**廉价**测试床
