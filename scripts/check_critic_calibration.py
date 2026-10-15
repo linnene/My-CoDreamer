@@ -135,7 +135,7 @@ def calibrate(path: pathlib.Path, args) -> dict:
     offset = float(ema[0]) if ema is not None else 0.0
     scale = float(max(ema[1] - ema[0], 1.0)) if ema is not None else 1.0
 
-    vs, gs, ghs = [], [], []
+    vs, gs, ghs, sls = [], [], [], []
     with torch.no_grad():
         for data in batches:
             obs = wm.preprocess(data)
@@ -148,6 +148,12 @@ def calibrate(path: pathlib.Path, args) -> dict:
             # 与 _train 一致：feat 保持 (B,T,N,·)，MLP 只动末维、GNN 读倒数第二维
             v = models._dist_mean(behavior.value(feat, graph=graph))
             v = v.reshape(feat.shape[:-1])             # (B,T,N)，强制丢掉头的尾维
+            # 慢目标（Polyak 平均）。用来检验"把自举换成慢目标"这条修法是否可能
+            # 起作用 —— 若两者几乎相同，慢目标只是延迟几十步的在线 critic，
+            # 换上去锚不住任何东西。fraction=0.02 对应时间常数 50 次更新，
+            # 而训练有约 32000 次更新。
+            slow = models._dist_mean(behavior._slow_value(feat, graph=graph))
+            slow = slow.reshape(feat.shape[:-1])
 
             # 真实折扣回报：G_t = Σ_{k≥0} γ^k r_{t+k}（终止后不再累加）
             rew = obs["reward"]                        # (B,T,N)
@@ -185,10 +191,12 @@ def calibrate(path: pathlib.Path, args) -> dict:
             vs.append(v.reshape(-1).cpu())
             gs.append(g.reshape(-1).cpu())
             ghs.append(gh.reshape(-1).cpu())
+            sls.append(slow.reshape(-1).cpu())
 
     V = torch.cat(vs).numpy()
     G = torch.cat(gs).numpy()
     Gh = torch.cat(ghs).numpy()
+    S = torch.cat(sls).numpy()
 
     def stats(a):
         return (
@@ -204,8 +212,13 @@ def calibrate(path: pathlib.Path, args) -> dict:
     # 归一化空间：critic 学的就是 (G - offset)/scale
     Vn, Gn, Ghn = (V - offset) / scale, (G - offset) / scale, (Gh - offset) / scale
 
+    Sn = (S - offset) / scale
+    # 慢目标与在线 critic 的相对差 —— 决定 value_bootstrap='slow' 是否可能有用
+    slow_gap = float(np.abs(S - V).mean() / max(np.abs(V).mean(), 1e-9))
     return {
         "path": str(path), "variant": cfg.comm_variant,
+        "slow_mean": float(S.mean()), "slow_gap": slow_gap,
+        "corr_slow_G": corr_of(Sn, Ghn),
         "offset": offset, "scale": scale, "horizon": Hs,
         "corr_norm": corr_of(Vn, Gn),          # 对全局长回报
         "corr_norm_h": corr_of(Vn, Ghn),       # 对训练同视界的短回报
@@ -241,6 +254,8 @@ def main() -> int:
             print(f"  {label:<14}{s[0]:>12.4f}{s[1]:>12.4f}{s[2]:>12.4f}{s[3]:>12.4f}")
         print(f"  相关系数（归一化空间） 对全局长回报 {r['corr_norm']:+.4f}   "
               f"对训练同视界 {r['corr_norm_h']:+.4f}")
+        print(f"  慢目标 mean={r['slow_mean']:.4f}  与在线 critic 的相对差 "
+              f"{r['slow_gap']*100:.2f}%   慢目标 vs 回报相关 {r['corr_slow_G']:+.4f}")
 
     print("\n" + "=" * 74)
     print("怎么读：")
