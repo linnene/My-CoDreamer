@@ -272,6 +272,27 @@ def make_env(config, mode, id):
             obs_mode=config.seg_obs_mode,
             graph_obs=config.seg_graph_obs,
         )
+    if suite == "vmas":
+        import envs.vmas_env as vmas_env
+
+        # [CoDreamer] VMAS 也是队伍级环境，同样直接返回。
+        #
+        # `task` 来自 `config.task.split("_", 1)`，所以 `vmas_buzz_wire` 得到的
+        # 是 `buzz_wire`（带下划线也正确）—— 与 VMASEnv.TASKS 的键一致。
+        # 场景参数（agent 数、目标数、障碍数）写死在 envs/vmas_env.py 的 TASKS 里，
+        # 取值来自论文 Table 8/9/10；只有 C 需要在这里可覆盖，因为论文没给。
+        return vmas_env.VMASEnv(
+            task=task,
+            seed=config.seed + id,
+            add_agent_index=config.vmas_add_agent_index,
+            graph_obs=config.vmas_graph_obs,
+            # <= 0 表示“用任务默认值”（见 TASKS）；正值才覆盖
+            comm_radius=(
+                None if config.vmas_comm_radius <= 0 else config.vmas_comm_radius
+            ),
+            max_steps=config.vmas_max_steps,
+            device=config.vmas_device,
+        )
     if suite == "dmc":
         import envs.dmc as dmc
 

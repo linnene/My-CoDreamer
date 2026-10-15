@@ -268,6 +268,20 @@ codreamer:
   # 开启后 observation_space 多出 "adjacency" 和 "edge_features" 两个 key。
   seg_graph_obs: false
 
+  # --- VMAS（论文正文主实验；task 用 --task vmas_flocking 之类指定）--------------
+  # 场景参数（agent 数、目标数、障碍数）取自论文 Table 8/9/10，写死在
+  # envs/vmas_env.py 的 TASKS 里；这里只暴露需要调的东西。
+  vmas_max_steps: 500          # 论文 Table 8 的 Avg. Time Horizon
+  # 通信半径 C。论文只说“边当且仅当 ||p_i - p_j|| <= C，C 由环境设定”，
+  # 但 VMAS 没有这个概念，论文也没给三个任务的值 —— 所以 C 是我们选的。
+  # <= 0 = 用任务默认（flocking/discovery 1.5，buzz_wire 0.5）。
+  # 默认值的选法：先量互距分布，再取一个让图既不空也不满的值。
+  # 详见 envs/vmas_env.py 的模块 docstring。
+  vmas_comm_radius: -1.0
+  vmas_graph_obs: true
+  vmas_add_agent_index: true   # 论文对 IDreamer 的明确要求（非视觉环境拼 one-hot）
+  vmas_device: 'cpu'           # VMAS 物理仿真放 CPU，策略仍在 GPU
+
 debug:
   debug: True
   pretrain: 1
