@@ -508,3 +508,42 @@ codreamer  model 20,405,526 / actor 2,368,009 / value 2,494,207
   代价是每隔 `eval_every` 多一批前向，可接受。
 - 三 seed × 两变体对照。**主指标是开环漂移，回报作次要** ——
   论文自己说 VMAS 上的回报差异可能是随机性。
+
+### 开环指标已进训练日志（冒烟验证通过）
+
+`models.openloop_error` 是**唯一实现**，训练循环与事后脚本 `scripts/eval_world_model.py`
+共用它（脚本原先自己有一份拷贝，那样两个口径会各自演化）。
+
+数据来自 `evaldir`：评测局现在会落盘，它们由当前策略现跑、从不参与梯度更新，
+天生是 held-out。`simulate_marl` 原先在 `is_eval` 分支里不写盘。
+
+冒烟实测（VMAS flocking，200 步，只为验证管线）：
+
+```
+[60] openloop_h1_reward_mae 0.0 / openloop_h16_kl 7.1 / openloop_h16_state_mse 5.6
+     ... reward_loss 1.0 / state_loss 0.5 / ...
+```
+
+**同一时刻 `reward_loss=1.0` 而 held-out 开环 `reward_mae=0.022`，差 45 倍。**
+这就是为什么拿 replay 训练损失判断"世界模型想得准不准"没有意义 ——
+它衡量的是重建（而且用的是看过当步观测的 posterior），不是预测。
+
+### ⚠️ 远端协作的坑：push 和 fetch 都会静默失败
+
+wyb 到 GitHub 的 443 时通时断，`git` 在连不上时的行为**极易骗人**，已经白追了一轮：
+
+1. `git push` 报成功，远端其实还是旧 commit → 训练跑的是没修复的代码；
+2. **更隐蔽**：`git fetch` 也静默失败，此时本地的 `origin/main` 是**旧**引用，
+   于是 `git reset --hard origin/main` 会**成功地**把代码重置回错误的 commit，
+   全程无报错。
+
+固化在 `scripts/sync_remote.sh`：fetch → 比对 hash → reset → **再验一次 HEAD**，
+任一步不匹配就重试。远端运行脚本里**不再写 git 命令**（它们不知道自己有没有成功）。
+
+### VMAS 下一步
+
+冒烟数字（200 步）是噪声，不是结果。正式对照需要：
+
+- `prefill >= 一局长度`（论文设定 500 步），否则攒不出完整队伍
+- `batch_size` 重新标定（仍是"队伍数"，但每队 4~5 agent）
+- 三 seed × 两变体，**主指标开环漂移，回报次要**（论文自己说 VMAS 上回报差异可能是随机性）
