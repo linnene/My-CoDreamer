@@ -237,6 +237,56 @@ class Dreamer(nn.Module):
                 self._metrics[name].append(value)
 
 
+def _log_openloop(wm, config, logger):
+    """[CoDreamer] 用 evaldir 里的 held-out 局算多步开环误差，写进训练日志。
+
+    为什么必须进日志、而不是只看事后脚本：事后只能看几个 checkpoint，
+    而"世界模型的预测能力随训练怎么变"是一条**曲线**，和回报曲线要能并排看。
+
+    数据是刚才那次评测写进 evaldir 的 —— 由**当前策略**现跑，从不参与任何
+    梯度更新（见 tools_marl.simulate_marl 里 is_eval 分支的说明）。
+
+    失败一律降级为跳过 + 打印，绝不让诊断指标把训练搞挂。
+    """
+    spec = config.openloop_horizons
+    if not spec:
+        return
+    if isinstance(spec, str):
+        horizons = [int(x) for x in spec.replace(",", " ").split() if x]
+    else:
+        horizons = [int(x) for x in spec]
+    if not horizons:
+        return
+    if config.batch_length < max(horizons) + 2:
+        print(
+            f"[CoDreamer] 跳过开环误差：batch_length={config.batch_length} 装不下 "
+            f"horizon={max(horizons)}（需要 >= {max(horizons) + 2}）"
+        )
+        return
+
+    eps = tools.load_episodes(config.evaldir, limit=config.dataset_size)
+    if not eps:
+        return
+    try:
+        data = next(tools_marl.make_graph_dataset(eps, config))
+        errs = models.openloop_error(wm, data, horizons)
+    except (ValueError, KeyError) as exc:
+        # ValueError：队伍不完整 / 序列太短 —— 刚开始训练时很正常
+        print(f"[CoDreamer] 跳过开环误差：{exc}")
+        return
+    for h, metrics in errs.items():
+        for key, value in metrics.items():
+            logger.scalar(f"openloop_h{h}_{key}", value)
+    print(
+        "[CoDreamer] held-out 开环误差 "
+        + "  ".join(
+            f"h{h}: rew={m['reward_mae']:.3f} cont={m['cont_mae']:.3f} "
+            f"kl={m['kl']:.3f}"
+            for h, m in sorted(errs.items())
+        )
+    )
+
+
 def count_steps(folder):
     return sum(int(str(n).split("-")[-1][:-4]) - 1 for n in folder.glob("*.npz"))
 
@@ -561,6 +611,9 @@ def main(config):
             if config.video_pred_log:
                 video_pred = agent._wm.video_pred(next(eval_dataset))
                 logger.video("eval_openl", to_np(video_pred))
+            # [CoDreamer] 世界模型"想得准不准"的唯一口径。
+            # 紧跟在评测后面：这一轮评测刚把 held-out 局写进 evaldir。
+            _log_openloop(agent._wm, config, logger)
 
         # [CoDreamer] 过了阀值就把环境切断。
         # logger.scalar("env_cutoff") 写成 0/1，画图时可以直接用它定位竖线。

@@ -127,6 +127,90 @@ def execution_graph(obs, num_agents, device=None, dtype=torch.float32):
     return adjacency, edge
 
 
+def _dist_mean(dist):
+    """取分布的均值。
+
+    不同分布类的接口**不一致**：奖励头（symlog_disc）把 `mean` 定为**属性**，
+    继续头（binary）定为**方法**。直接 `.mean()` 会在前者上报
+    `'Tensor' object is not callable`。这个坑踩过三次，所以统一走这里。
+    """
+    m = dist.mean
+    return m() if callable(m) else m
+
+
+@torch.no_grad()
+def openloop_error(wm, data, horizons):
+    """held-out 上的**多步开环**预测误差。返回 {horizon: {...}}。
+
+    流程：posterior 吃完整个序列（允许看观测）→ 取某个时刻的状态 → 之后**只喂
+    真实动作、不再看任何观测**，让 prior 往前走 → 在每个 horizon 比较预测与真值。
+
+    为什么不能用 `_train` 返回的 `reward_loss` / `state_loss`：
+      1. 那是**训练损失** —— 同一份 replay 被反复优化，损失下降可以只是记住了它；
+      2. 它用的是 **posterior** 隐状态（`feat = get_feat(post)`），而 posterior 每步
+         都**看过当步观测**。它衡量的是"给定当前帧重建当前帧"，不是预测未来。
+
+    图用**冻结的起点图**（论文要求想象阶段复用起点图），所以这个误差反映的正是
+    想象轨迹所处的条件。
+
+    四个量：
+        reward_mae   预测奖励 vs 真实奖励（最直接有用的东西）
+        cont_mae     预测继续概率 vs 真实（1 - is_terminal）
+        kl           rollout 出的 prior 与真实 posterior 的 KL —— 隐状态漂移
+        state_mse    用 prior 特征重建观测的 MSE（decoder）
+
+    这个函数是**训练日志与事后脚本共用的唯一实现**。复制一份出去就等于让两边的
+    口径慢慢分家。
+    """
+    horizons = sorted({int(h) for h in horizons})
+    H = max(horizons)
+    obs = wm.preprocess(data)
+    graph = graph_from_data(obs, wm._config.device)
+    embed = wm.encoder(obs)
+    post, _ = wm.dynamics.observe(embed, obs["action"], obs["is_first"], graph=graph)
+
+    T = obs["action"].shape[1]
+    if T < H + 2:
+        raise ValueError(f"batch_length={T} 太短，open-loop 至少要 {H + 2}")
+    t0 = T - H - 1
+    state = {k: v[:, t0] for k, v in post.items()}
+    if graph is None:
+        g0 = None
+    else:
+        g0 = (graph[0][:, t0], None if graph[1] is None else graph[1][:, t0])
+
+    def head(name, feat):
+        # 与 _train 一致：只有 reward / cont 头接收图，decoder 永远独立。
+        if name in wm._comm_heads:
+            return wm.heads[name](feat, graph=g0)
+        return wm.heads[name](feat)
+
+    out: dict[int, dict[str, float]] = {}
+    for k in range(1, H + 1):
+        state = wm.dynamics.img_step(
+            state, obs["action"][:, t0 + k - 1], sample=False, graph=g0
+        )
+        feat = wm.dynamics.get_feat(state)
+        if k not in horizons:
+            continue
+        rew_pred = _dist_mean(head("reward", feat))
+        cont_pred = _dist_mean(head("cont", feat))
+        post_k = {key: v[:, t0 + k] for key, v in post.items()}
+        _, kl_value, _, _ = wm.dynamics.kl_loss(post_k, state, 1.0, 0.5, 1.0)
+        recon = _dist_mean(wm.heads["decoder"](feat)["state"])
+        out[k] = {
+            "reward_mae": float(
+                (rew_pred - obs["reward"][:, t0 + k]).abs().mean()
+            ),
+            "cont_mae": float((cont_pred - obs["cont"][:, t0 + k]).abs().mean()),
+            "kl": float(kl_value.mean()),
+            "state_mse": float(
+                ((recon - obs["state"][:, t0 + k]) ** 2).mean()
+            ),
+        }
+    return out
+
+
 # [CoDreamer] 图批次 (B, T, N, N) -> (B*T, N, N)
 def flatten_graph(graph):
     """把图的时间维与 batch 维合并，与 `ImagBehavior._imagine` 对隐状态做的 flatten

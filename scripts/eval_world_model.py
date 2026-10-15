@@ -124,65 +124,12 @@ def heldout_batch(config, agent, repeats: int = 20, teams: int = 40):
         return [next(dataset) for _ in range(repeats)]
 
 
-def _mean(dist):
-    """取分布的均值。
+def openloop(wm, data, config, horizons, max_horizon=None):
+    """薄包装 —— 唯一实现在 `models.openloop_error`，训练日志用的是同一份。
 
-    注意：不同分布类的接口不一样 —— 有的把 `mean` 定义成**属性**（一个 Tensor），
-    有的定义成**方法**。直接 `.mean()` 会在前者上报 `'Tensor' object is not callable`。
-    奖励头（symlog_disc）与继续头（binary）恰好分属两类。
+    这里曾经有一份拷贝，那等于让训练时的口径和事后分析的口径各自演化。
     """
-    m = dist.mean
-    return m() if callable(m) else m
-
-
-@torch.no_grad()
-def openloop(wm, data, config, horizons, max_horizon: int):
-    """返回 {horizon: {reward_mae, cont_mae, kl, state_mse, n}}。"""
-    obs = wm.preprocess(data)
-    graph = models.graph_from_data(obs, config.device)
-    embed = wm.encoder(obs)
-    post, _ = wm.dynamics.observe(embed, obs["action"], obs["is_first"], graph=graph)
-
-    T = obs["action"].shape[1]
-    H = max_horizon
-    if T < H + 2:
-        raise SystemExit(f"batch_length={T} 太短，open-loop 至少要 {H + 2}")
-
-    t0 = T - H - 1
-    state = {k: v[:, t0] for k, v in post.items()}
-    # 冻结起点图 —— 与想象阶段一致（论文：整段轨迹复用起点图）
-    if graph is None:
-        g0 = None
-    else:
-        g0 = (graph[0][:, t0], None if graph[1] is None else graph[1][:, t0])
-
-    out = {}
-    for k in range(1, H + 1):
-        state = wm.dynamics.img_step(state, obs["action"][:, t0 + k - 1], sample=False, graph=g0)
-        feat = wm.dynamics.get_feat(state)
-
-        rew_pred = _mean(wm.heads["reward"](feat, graph=g0))
-        cont_pred = _mean(wm.heads["cont"](feat, graph=g0))
-        rew_true = obs["reward"][:, t0 + k]
-        cont_true = obs["cont"][:, t0 + k]
-
-        # 隐状态漂移：rollout 出的 prior 与真实 posterior 的 KL
-        post_k = {key: v[:, t0 + k] for key, v in post.items()}
-        _, kl_value, _, _ = wm.dynamics.kl_loss(post_k, state, 1.0, 0.5, 1.0)
-
-        # 状态漂移的另一面：用 prior 特征重建观测
-        recon = _mean(wm.heads["decoder"](feat)["state"])
-        state_mse = ((recon - obs["state"][:, t0 + k]) ** 2).mean()
-
-        if k in horizons:
-            out[k] = {
-                "reward_mae": float((rew_pred - rew_true).abs().mean()),
-                "cont_mae": float((cont_pred - cont_true).abs().mean()),
-                "kl": float(kl_value.mean()),
-                "state_mse": float(state_mse),
-                "n": int(rew_true.numel()),
-            }
-    return out
+    return models.openloop_error(wm, data, horizons)
 
 
 def plot(results: dict, out: pathlib.Path, groups: list[str] | None = None) -> None:

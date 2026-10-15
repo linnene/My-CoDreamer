@@ -479,10 +479,18 @@ def simulate_marl(
                 if is_eval:
                     # 评测时：N 个 agent 各算一条 episode
                     for k in range(n_agents):
-                        ep = cache[agent_episode_id(team_ids[i], k)]
+                        key = agent_episode_id(team_ids[i], k)
+                        ep = cache[key]
                         eval_lengths.append(len(ep["reward"]) - 1)
                         eval_scores.append(float(np.array(ep["reward"]).sum()))
                         eval_team_ids.append(team_ids[i])
+                        # [CoDreamer] 评测局也落盘。
+                        #
+                        # 它们由**当前策略**在环境里现跑，从不参与任何梯度更新，
+                        # 所以是天然的 held-out —— 训练中测开环预测误差正需要它。
+                        # 代价很小（每次评测 N 条），换来的是一个**随策略推进而更新**
+                        # 的评测集，比在 replay 里切一块早期的出来更真实。
+                        save_episodes(directory, {key: ep})
                 else:
                     for k in range(n_agents):
                         key = agent_episode_id(team_ids[i], k)

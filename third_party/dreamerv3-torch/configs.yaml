@@ -282,6 +282,17 @@ codreamer:
   vmas_add_agent_index: true   # 论文对 IDreamer 的明确要求（非视觉环境拼 one-hot）
   vmas_device: 'cpu'           # VMAS 物理仿真放 CPU，策略仍在 GPU
 
+  # --- held-out 开环预测误差（世界模型"想得准不准"的口径）------------------------
+  # 每隔一次评测，用 evaldir 里的 held-out 局算多步开环误差并写进日志：
+  # posterior 吃完序列后，**只喂真实动作、不再看观测**，让 prior 往前走。
+  #
+  # 为什么不能用 replay 的 reward_loss / state_loss 代替：那是训练损失，且用的是
+  # **看过当步观测的 posterior** —— 它衡量重建，不衡量预测。见 models.openloop_error。
+  #
+  # 格式：空格分隔的 horizon 列表（空字符串 = 关闭）。
+  # 必须 <= batch_length - 2（默认 batch_length=64）。
+  openloop_horizons: '1 4 16'
+
 debug:
   debug: True
   pretrain: 1
