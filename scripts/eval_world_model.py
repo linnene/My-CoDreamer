@@ -243,7 +243,14 @@ def main() -> int:
     horizons = sorted(set(args.horizons))
     H = max(horizons)
 
-    # 共享轨迹目录：存在即复用，所以两个 checkpoint 评的是**同一批** npz
+    # 共享轨迹目录：存在即复用，所以所有 checkpoint 评的是**同一批** npz。
+    #
+    # 三种跑法，回答三个不同的问题：
+    #   --rollout random                    一批中性轨迹，谁都没有主场优势
+    #   --rollout self --rollout-dir D      由**第一个** checkpoint 的策略采集，其余复用
+    #                                       → 把采集者写在前面，即可让两个模型都评在
+    #                                         某一方的 on-policy 分布上（主场优势测试）
+    #   --rollout self（不给目录）           各自 on-policy —— 唯一的不可跨模型比的跑法
     shared_dir = None
     if args.rollout == "random":
         shared_dir = args.rollout_dir or tempfile.mkdtemp(prefix="shared_heldout_")
@@ -251,6 +258,15 @@ def main() -> int:
             f"\n共享轨迹模式：均匀随机策略采集，所有 checkpoint 评在同一批数据上\n"
             f"  目录 {shared_dir}\n"
             f"  注意：这些状态离各自的训练分布更远，与 on-policy 的数字**不可混用**"
+        )
+    elif args.rollout_dir:
+        shared_dir = args.rollout_dir
+        print(
+            f"\n共享轨迹模式：由**第一个** checkpoint（{ckpts[0][0]}）的策略采集，"
+            f"其余 checkpoint 评在同一批数据上\n"
+            f"  目录 {shared_dir}\n"
+            f"  这一批对 {ckpts[0][0]} 是 on-policy 分布，对其余模型是 off-policy —— "
+            f"正是用来检验差距里有多少来自分布"
         )
     else:
         print("\non-policy 模式：每个 checkpoint 用**自己的策略**采集轨迹")
@@ -285,12 +301,18 @@ def main() -> int:
             if shared_dir is None:
                 batches = heldout_batch(cfg, agent, args.batches, args.teams)
             else:
-                batches = heldout_batch(
-                    cfg, None, args.batches, args.teams,
-                    policy=_UniformPolicy(
+                # random 模式才换采集者；否则用本 checkpoint 自己的策略
+                # （目录是持久的，所以实际只有第一个会真正采集）
+                collector = (
+                    _UniformPolicy(
                         cfg.num_actions, cfg.num_agents, seed=getattr(cfg, "seed", 0)
-                    ),
-                    out_dir=shared_dir,
+                    )
+                    if args.rollout == "random"
+                    else None
+                )
+                batches = heldout_batch(
+                    cfg, agent, args.batches, args.teams,
+                    policy=collector, out_dir=shared_dir,
                 )
             acc: dict[int, list[dict]] = {h: [] for h in horizons}
             for data in batches:
