@@ -85,29 +85,67 @@ class _SilentLogger:
         pass
 
 
-def heldout_batch(config, agent, repeats: int = 20, teams: int = 40):
-    """用**策略自己**跑一批全新的 episode，作为 held-out。
+class _UniformPolicy:
+    """与任何模型无关的均匀随机策略 —— 用于采集**共享**轨迹。
+
+    它不依赖 checkpoint，所以两个世界模型评在同一批数据上时，谁都没有主场优势。
+    代价是这些状态离训练分布更远（见 heldout_batch 的说明）。
+    """
+
+    def __init__(self, num_actions: int, num_agents: int, seed: int = 0):
+        self.num_actions = num_actions
+        self.num_agents = num_agents
+        self.rng = np.random.default_rng(seed)
+
+    def __call__(self, obs, done, state):
+        batch = obs["state"].shape[0]
+        idx = self.rng.integers(0, self.num_actions, size=batch)
+        action = np.eye(self.num_actions, dtype=np.float32)[idx]
+        return {"action": action, "logprob": np.zeros(batch, np.float32)}, None
+
+
+def heldout_batch(
+    config,
+    agent=None,
+    repeats: int = 20,
+    teams: int = 40,
+    policy=None,
+    out_dir=None,
+):
+    """跑一批全新的 episode 作为 held-out，返回 repeats 个图批次。
+
+    采集者二选一：
+      - `agent`：用**策略自己**跑（默认）。数据在分布内，且从未参与任何梯度更新。
+      - `policy`：用指定的、与模型无关的策略跑（配合 `out_dir` 复用同一批数据）。
+
+    为什么必须能指定 `policy`（加于 2026-10-15）：
+    两个 checkpoint 各自 on-policy 采集时，**两个世界模型根本不在同一批数据上比**。
+    此时"CoDreamer 的 state_mse 差 4 倍"里同时含着两样东西——模型能力的差异，
+    和两个策略访问的状态分布不同。把两者分开的唯一办法，是让它们在**同一批**
+    (观测, 动作, 真值未来) 上各算一次。
+
+    两条路都要留着并分别标注：共享轨迹上没有主场优势，但状态离训练分布更远；
+    on-policy 分布内，却只回答"各自访问分布上的误差"。混着用会得到两个都不能
+    回答的数。
 
     为什么不能用 `evaldir`：`tools_marl.simulate_marl` 在 `is_eval=True` 时
     **不落盘**（那个分支里没有 save_episodes），所以 evaldir 是空的。
 
     为什么不能用训练 replay：它的每一帧都被梯度更新看过，拿它算预测误差等于
     在训练集上报数。
-
-    为什么不用随机策略采：那会得到与训练分布不同的状态，测的就不是"世界模型
-    在自己见过的状态附近能不能预测"。用策略自己跑，数据既在分布内、又从未参与
-    任何一次梯度更新。
     """
-    with tempfile.TemporaryDirectory() as tmp:
+
+    def rollout(directory):
         envs = [dreamer_mod.make_env(config, "eval", i) for i in range(config.envs)]
         try:
             tools_marl.simulate_marl(
-                functools.partial(agent, training=False),
+                policy if policy is not None
+                else functools.partial(agent, training=False),
                 envs,
                 {},
-                tmp,
+                directory,
                 _SilentLogger(),
-                is_eval=False,          # False 才会落盘，之后按与训练**完全相同**的格式读回来
+                is_eval=False,      # False 才会落盘，之后按与训练**完全相同**的格式读回来
                 limit=10**6,
                 episodes=teams * config.num_agents,
             )
@@ -117,11 +155,23 @@ def heldout_batch(config, agent, repeats: int = 20, teams: int = 40):
                     e.close()
                 except Exception:
                     pass
-        eps = tools.load_episodes(tmp, limit=10**6)
-        if not eps:
-            raise SystemExit("held-out rollout 没写出任何 episode")
-        dataset = tools_marl.make_graph_dataset(eps, config)
-        return [next(dataset) for _ in range(repeats)]
+
+    if out_dir is not None:
+        # 共享轨迹：目录里已有 npz 就复用，不重采
+        path = pathlib.Path(out_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        if not list(path.glob("*.npz")):
+            rollout(path)
+        eps = tools.load_episodes(path, limit=10**6)
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            rollout(tmp)
+            eps = tools.load_episodes(tmp, limit=10**6)
+
+    if not eps:
+        raise SystemExit("held-out rollout 没写出任何 episode")
+    dataset = tools_marl.make_graph_dataset(eps, config)
+    return [next(dataset) for _ in range(repeats)]
 
 
 def openloop(wm, data, config, horizons, max_horizon=None):
@@ -175,6 +225,12 @@ def main() -> int:
     ap.add_argument("--batches", type=int, default=20, help="重复采样几批")
     ap.add_argument("--teams", type=int, default=40, help="held-out rollout 采几支队")
     ap.add_argument("--device", default="cuda:0")
+    ap.add_argument(
+        "--rollout", choices=["self", "random"], default="self",
+        help="self=各自 on-policy 采集（默认，分布内但两个模型不在同一批数据上）；"
+             "random=用均匀随机策略采一批共享轨迹，所有 checkpoint 评在同一批数据上",
+    )
+    ap.add_argument("--rollout-dir", default=None, help="共享轨迹的落地目录（复用/复现用）")
     ap.add_argument("--out-json", default=None)
     ap.add_argument("--out", default=None, help="误差-水平线图（png）")
     args = ap.parse_args()
@@ -186,6 +242,19 @@ def main() -> int:
 
     horizons = sorted(set(args.horizons))
     H = max(horizons)
+
+    # 共享轨迹目录：存在即复用，所以两个 checkpoint 评的是**同一批** npz
+    shared_dir = None
+    if args.rollout == "random":
+        shared_dir = args.rollout_dir or tempfile.mkdtemp(prefix="shared_heldout_")
+        print(
+            f"\n共享轨迹模式：均匀随机策略采集，所有 checkpoint 评在同一批数据上\n"
+            f"  目录 {shared_dir}\n"
+            f"  注意：这些状态离各自的训练分布更远，与 on-policy 的数字**不可混用**"
+        )
+    else:
+        print("\non-policy 模式：每个 checkpoint 用**自己的策略**采集轨迹")
+        print("  注意：两个模型因此不在同一批数据上 —— 跨模型的差距里含着分布差异")
 
     results = {}
     for name, path in ckpts:
@@ -213,7 +282,16 @@ def main() -> int:
             agent.eval()
             wm = agent._wm
 
-            batches = heldout_batch(cfg, agent, args.batches, args.teams)
+            if shared_dir is None:
+                batches = heldout_batch(cfg, agent, args.batches, args.teams)
+            else:
+                batches = heldout_batch(
+                    cfg, None, args.batches, args.teams,
+                    policy=_UniformPolicy(
+                        cfg.num_actions, cfg.num_agents, seed=getattr(cfg, "seed", 0)
+                    ),
+                    out_dir=shared_dir,
+                )
             acc: dict[int, list[dict]] = {h: [] for h in horizons}
             for data in batches:
                 got = openloop(wm, data, cfg, set(horizons), H)
