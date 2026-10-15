@@ -182,6 +182,11 @@ actor、critic 共用）会**全部自动带上通信信息**。
 
 ### 环境路线
 
+> **进展**：Sequential Estimate Game 已跑完并判定为**饱和**（六配置扫描 + 三 seed
+> 对照全部收敛到同一回报），不再用于通信对照。已转入 **VMAS**。
+> `envs/vmas_env.py` 完成并通过自检（三任务 × 图性质 / 形状 / 越界 / 可重现）。
+
+
 | 环境 | 用途 | 依赖 |
 |---|---|---|
 | **Sequential Estimate Game** | 首选。论文自造，Table 1 给了完整规格 | **纯 Python，零依赖** |
@@ -421,3 +426,50 @@ KL 相差 **5.9 倍**，三个 seed **完全不重叠**。CoDreamer 的开环漂
    所以「CoDreamer 与 IDreamer 的回报谁高」在本环境上**没有信息量**，
    需要 VMAS。
 4. **Phase 2 降级为诊断**：基础对照与通信消融成立之前，它不应该当主结果。
+
+---
+
+## 转入 VMAS（2026-10-15）
+
+### 为什么换：论文自己的消融给出了环境排序
+
+附录 C 的三段消融合起来是一张判别力的排序表，**与"论文正文主实验=最能区分"的
+直觉相反**：
+
+| 环境 | 论文原话 | 判别力 |
+|---|---|---|
+| Melting Pot | "probability > 0.5 of improving upon IDreamer **with statistical significance**"；WM Comm 贡献最大 | **最强** |
+| Estimate Game | "this overlap of information is **highly evident by the construction of the environment**" | 中 |
+| VMAS | "**not highly inter-agent dependent**"、"IDreamer and CoDreamer are **similar**... due to **stochasticity**" | **最弱** |
+
+VMAS 仍是必做项：它是**正文主实验**（Figure 4），且向量观测 / 4~5 agent / 500 步
+在本机跑得动。但它同时解释了为什么"回报分不出差别"不能当作复现失败 ——
+论文自己就承认在 VMAS 上是在看随机噪声。
+
+**因此 VMAS 上的关键指标不是回报，而是我们在 Estimate Game 上验证过的那一个：
+held-out 开环隐状态漂移**（那里它给出了 5.9 倍、三 seed 不重叠的差异，而回报
+完全分不出）。把同一指标搬到 VMAS 上，检验那个发现能否推广。
+
+### 已完成的落地
+
+`envs/vmas_env.py` —— 队伍级包装，接口与 `envs/seg_gym.py` 逐条对齐
+（单 agent 视角的 space 声明、队伍级 reset/step、逐 agent 奖励、同样的图键），
+所以 `tools_marl.simulate_marl` 一个字都不用改。自检：
+`python -m envs.vmas_env`。
+
+### 三个必须自己定、而不是查得到的东西
+
+| # | 缺口 | 处理 |
+|---|---|---|
+| 1 | **通信半径 C** | 论文只说"边当且仅当 ‖p_i−p_j‖ ≤ C，C 由环境设定"，但 VMAS 没有这个概念，论文也没给三个任务的值。**实测互距分布后再选**：flocking N=4 中位 1.13 → C=1.5（平均度 2.45/3）；discovery N=5 中位 1.11 → C=1.5；buzz_wire 互距**恒 0.49**（刚性连杆）→ C=0.5 恒连通。可用 `--vmas_comm_radius` 覆盖 |
+| 2 | **版本漂移** | vmas 1.5.2 的离散动作是 `nvec=[3,3]`（9 个组合、对外一个索引），论文写 Discrete (5)；观测维 Discovery 19（论文 21）、Buzz Wire 6（论文 8），只有 Flocking 的 18 与论文一致。**需要严格对齐时要把 vmas 钉回论文时期的版本** |
+| 3 | **buzz_wire 的图不变化** | 两 agent 由刚性连杆相连，互距几乎恒定 → 拓扑要么恒连通要么恒断开。不影响 CoDreamer 的语义（通信=聚合邻居隐状态），但**该任务不能用于图稀疏度消融** |
+
+### 下一步
+
+1. `dreamer.py` 的 `make_env` 加 `vmas` 分支（读 `config.vmas_task` 等）
+2. `configs.yaml` 加 VMAS 配置块（`batch_size`、`action_repeat` 需重新标定 ——
+   注意 `action_repeat` 与 `train_ratio` 的耦合会直接放大训练强度）
+3. 冒烟：跑通 IDreamer / CoDreamer 各一小段
+4. **把开环漂移指标接进训练日志**（不只是事后脚本），使它随训练过程出曲线
+5. 三 seed 对照，主看开环漂移，回报作为次要
