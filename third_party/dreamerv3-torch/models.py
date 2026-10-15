@@ -186,6 +186,15 @@ def openloop_error(wm, data, horizons):
         return wm.heads[name](feat)
 
     out: dict[int, dict[str, float]] = {}
+
+    def align(pred, target):
+        """预测头返回 (..., 1)，真值是 (...,)。
+
+        不 squeeze 的话广播会**从右边对齐**： (2,4,1) 对 (2,4) 被读成
+        (2,4,1) 对 (1,2,4)，dim1 上 4 vs 2 直接报错。
+        """
+        return pred.squeeze(-1) if pred.dim() == target.dim() + 1 else pred
+
     for k in range(1, H + 1):
         state = wm.dynamics.img_step(
             state, obs["action"][:, t0 + k - 1], sample=False, graph=g0
@@ -193,16 +202,16 @@ def openloop_error(wm, data, horizons):
         feat = wm.dynamics.get_feat(state)
         if k not in horizons:
             continue
-        rew_pred = _dist_mean(head("reward", feat))
-        cont_pred = _dist_mean(head("cont", feat))
+        rew_true = obs["reward"][:, t0 + k]
+        cont_true = obs["cont"][:, t0 + k]
+        rew_pred = align(_dist_mean(head("reward", feat)), rew_true)
+        cont_pred = align(_dist_mean(head("cont", feat)), cont_true)
         post_k = {key: v[:, t0 + k] for key, v in post.items()}
         _, kl_value, _, _ = wm.dynamics.kl_loss(post_k, state, 1.0, 0.5, 1.0)
         recon = _dist_mean(wm.heads["decoder"](feat)["state"])
         out[k] = {
-            "reward_mae": float(
-                (rew_pred - obs["reward"][:, t0 + k]).abs().mean()
-            ),
-            "cont_mae": float((cont_pred - obs["cont"][:, t0 + k]).abs().mean()),
+            "reward_mae": float((rew_pred - rew_true).abs().mean()),
+            "cont_mae": float((cont_pred - cont_true).abs().mean()),
             "kl": float(kl_value.mean()),
             "state_mse": float(
                 ((recon - obs["state"][:, t0 + k]) ** 2).mean()
