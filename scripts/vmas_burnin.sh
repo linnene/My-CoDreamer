@@ -9,12 +9,25 @@
 #
 # 与论文设定的偏离（必须记录）：
 #   vmas_max_steps 200（论文 500）—— 为了让短预算里能有足够多完整局
-#   batch_length 16（论文 64）、batch_size 4 队（论文 16）、imag_horizon 10（论文 15）
+#   batch_length 24（论文 64）、batch_size 4 队（论文 16）、imag_horizon 10（论文 15）
 #   train_ratio 512 保持论文设定 —— 它锁死每 agent 步的更新次数，是"训练强度"本身
 # 两个变体用**完全相同**的设定，所以对比是公平的。
 export PATH=/home/wyb/anaconda3/envs/codreamer/bin:$PATH
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd /home/wyb/CoDreamer/third_party/dreamerv3-torch
+
+# 开环 horizons 与 batch_length 必须自洽 —— 否则主指标静默消失。
+BATCH_LENGTH=24
+HORIZONS="1 4 16"
+
+# dreamer.py 的门是 batch_length < max(horizon)+2 就**整体跳过**（全有或全无），
+# 只打印一行"跳过"然后照常跑完。第一版 burn-in 就是 batch_length 16 配 horizon 16，
+# 45 分钟跑完，开环数字一个都没有。挡在这里：
+MAX_H=$(echo "$HORIZONS" | tr ' ' '\n' | sort -n | tail -1)
+if [ $((MAX_H + 2)) -gt "$BATCH_LENGTH" ]; then
+  echo "配置不自洽：horizon=$MAX_H 需要 batch_length >= $((MAX_H + 2))，当前 $BATCH_LENGTH" >&2
+  exit 1
+fi
 
 for VAR in idreamer codreamer; do
   D=/tmp/runs/vmas_burn_$VAR
@@ -22,9 +35,9 @@ for VAR in idreamer codreamer; do
   echo "===== $VAR  $(date +%T) ====="
   python -u dreamer.py --configs codreamer --task vmas_flocking --comm_variant $VAR \
     --vmas_max_steps 200 --steps 15000 --prefill 250 \
-    --envs 4 --batch_size 4 --batch_length 16 --imag_horizon 10 \
+    --envs 4 --batch_size 4 --batch_length "$BATCH_LENGTH" --imag_horizon 10 \
     --train_ratio 512 --eval_every 3000 --eval_episode_num 4 --log_every 1000 \
-    --action_repeat 1 --openloop_horizons "1 4 16" \
+    --action_repeat 1 --openloop_horizons "$HORIZONS" \
     --logdir "$D" --device cuda:0 > "$D.log" 2>&1
   echo "  退出码=$?  墙钟 $(date +%T)"
   echo "  参数量: $(grep -a 'Optimizer model_opt' "$D.log" | sed 's/.*has //;s/ variables.*//')"
