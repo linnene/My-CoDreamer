@@ -372,18 +372,19 @@ def _self_test() -> None:
         # 每局可确定重现（配对评测的前提）
         env.seed(11)
         env.reset()
-        a = np.stack([x.state.pos[0].cpu().numpy() for x in env._env.agents])
+        pos_p = np.stack([x.state.pos[0].cpu().numpy() for x in env._env.agents])
         env.reset()
-        b = np.stack([x.state.pos[0].cpu().numpy() for x in env._env.agents])
-        check(f"{task}: seed(k) 后 reset 可重现", bool(np.allclose(a, b)))
+        pos_q = np.stack([x.state.pos[0].cpu().numpy() for x in env._env.agents])
+        check(f"{task}: seed(k) 后 reset 可重现", bool(np.allclose(pos_p, pos_q)))
 
         # 默认路径（不强制）：同一实例两次 reset 应该**不同**，否则局没有随机性
+        # 注：这里的变量名不要用 d / n —— 上面已经把 d 用做观测维度。
         env.seed(None)
         env.reset()
-        c = np.stack([x.state.pos[0].cpu().numpy() for x in env._env.agents])
+        pos_a = np.stack([x.state.pos[0].cpu().numpy() for x in env._env.agents])
         env.reset()
-        d = np.stack([x.state.pos[0].cpu().numpy() for x in env._env.agents])
-        check(f"{task}: 默认路径每局不同（有随机性）", not bool(np.allclose(c, d)))
+        pos_b = np.stack([x.state.pos[0].cpu().numpy() for x in env._env.agents])
+        check(f"{task}: 默认路径每局不同（有随机性）", not bool(np.allclose(pos_a, pos_b)))
 
         # 关掉 agent 索引后维度变窄
         env2 = VMASEnv(task=task, seed=0, add_agent_index=False)
