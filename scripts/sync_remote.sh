@@ -19,6 +19,10 @@
 #   bash scripts/sync_remote.sh              # 同步到本地当前的 HEAD
 #   bash scripts/sync_remote.sh <sha>        # 同步到指定 commit
 #   HOST=wyb REPO=/home/wyb/CoDreamer bash scripts/sync_remote.sh
+#   REF=exp/my-branch bash scripts/sync_remote.sh      # 同步某个分支（并在远端切过去）
+#
+# REF 默认 main。跑实验分支时必须显式给 —— 否则远端会停在上一个分支上，
+# 而"停在哪个分支"不会出现在任何校验里（hash 对得上，分支不对，代码就是另一份）。
 #
 # 远端运行脚本里**不要**再写 git 命令 —— 那些脚本不知道自己有没有同步成功。
 # 先跑本脚本，再启动任务。
@@ -26,25 +30,28 @@ set -uo pipefail
 
 HOST="${HOST:-wyb}"
 REPO="${REPO:-/home/wyb/CoDreamer}"
+REF="${REF:-main}"
 SHA="${1:-$(git rev-parse HEAD)}"
 ATTEMPTS="${ATTEMPTS:-20}"
 
-echo "同步 $HOST:$REPO -> $SHA"
+echo "同步 $HOST:$REPO -> $REF @ $SHA"
 
 remote_sha() {
   ssh -o BatchMode=yes -o ConnectTimeout=20 "$HOST" \
-    "cd $REPO && git rev-parse origin/main 2>/dev/null" 2>/dev/null
+    "cd $REPO && git rev-parse origin/$REF 2>/dev/null" 2>/dev/null
 }
 
 for i in $(seq 1 "$ATTEMPTS"); do
   # fetch 可能静默失败，所以每一步都不看退出码，只看 hash
   ssh -o BatchMode=yes -o ConnectTimeout=20 "$HOST" \
-    "cd $REPO && git fetch -q origin main >/dev/null 2>&1 || true" 2>/dev/null
+    "cd $REPO && git fetch -q origin $REF >/dev/null 2>&1 || true" 2>/dev/null
 
   cur="$(remote_sha)"
   if [ "$cur" = "$SHA" ]; then
+    # 检出并切到 $REF（本地已存在则复用）。fetch 刚成功，FETCH_HEAD 就是该 tip；
+    # 再用 reset --hard 钉死一次，这样两个来源必须一致才会通过。
     ssh -o BatchMode=yes -o ConnectTimeout=20 "$HOST" \
-      "cd $REPO && git reset -q --hard $SHA" 2>/dev/null
+      "cd $REPO && git checkout -q -f -B $REF FETCH_HEAD && git reset -q --hard $SHA" 2>/dev/null
     # reset 之后**再验一次** —— reset 也可能因为别的原因没生效
     got="$(ssh -o BatchMode=yes -o ConnectTimeout=20 "$HOST" \
       "cd $REPO && git rev-parse HEAD" 2>/dev/null)"

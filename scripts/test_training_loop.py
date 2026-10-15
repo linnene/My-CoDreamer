@@ -113,7 +113,14 @@ def max_diff(a: dict, b: dict) -> float:
 # ---------------------------------------------------------------------------
 # 搭一个最小的真实训练环境：环境 -> replay -> 图数据集 -> Dreamer
 # ---------------------------------------------------------------------------
-def build_run(tmp: pathlib.Path, *, variant: str, pretrain: int, seed: int = 0):
+def build_run(
+    tmp: pathlib.Path,
+    *,
+    variant: str,
+    pretrain: int,
+    seed: int = 0,
+    gnn: tuple[int, int, int] | None = None,
+):
     cfg = copy.deepcopy(load_config(["defaults", "codreamer"]))
     cfg.envs = 1                 # 1 支队
     cfg.batch_size = 1           # batch_size 的单位是队伍数
@@ -123,10 +130,10 @@ def build_run(tmp: pathlib.Path, *, variant: str, pretrain: int, seed: int = 0):
     cfg.seg_graph_obs = True
     cfg.seg_num_agents = 4
     cfg.comm_variant = variant
-    # -1 = 跟随 comm_variant（与 yaml 默认一致）
-    cfg.gnn_layers = -1
-    cfg.gnn_head_layers = -1
-    cfg.gnn_behavior_layers = -1
+    # -1 = 跟随 comm_variant（与 yaml 默认一致）。消融时传 gnn=(rssm, head, behavior)。
+    cfg.gnn_layers, cfg.gnn_head_layers, cfg.gnn_behavior_layers = (
+        gnn if gnn is not None else (-1, -1, -1)
+    )
     cfg.device = "cpu"
     cfg.precision = 32
     cfg.compile = False
@@ -369,6 +376,82 @@ def section_variant_switch() -> None:
         check("非法 comm_variant 会报错", True)
 
 
+# ---------------------------------------------------------------------------
+# [7] 消融臂的参数恒等式 —— 机械可查的"没串味"检查
+# ---------------------------------------------------------------------------
+#
+# 论文的核心结果是**两级通信的分解**（WM Comm / AC Comm / CoDreamer / IDreamer），
+# 而我们此前只跑过三处全 0 与三处全 1 这两个端点。做那四个臂之前先钉死一件事：
+# 打开哪一处的 GNN，就只能改变那一处的参数量。
+#
+# 这些恒等式不需要训练就能查。一旦不成立，四臂实验的全部结论都是错的 ——
+# 它们会变成"某个我没意识到的地方也被改了"的对照。
+ABLATION_ARMS = {
+    # 名字         (rssm, head, behavior)
+    "idreamer": (0, 0, 0),
+    "wm_comm": (1, 1, 0),
+    "ac_comm": (0, 0, 1),
+    "codreamer": (1, 1, 1),
+}
+
+
+def n_params(module) -> int:
+    return sum(p.numel() for p in module.parameters())
+
+
+def section_ablation_params(root: pathlib.Path) -> None:
+    print("\n[7] 消融臂：三处 GNN 的参数量互不串味")
+    counts = {}
+    for name, gnn in ABLATION_ARMS.items():
+        tmp = root / f"abl_{name}"
+        tmp.mkdir(parents=True, exist_ok=True)
+        _, env, agent = build_run(tmp, variant="idreamer", pretrain=1, gnn=gnn)
+        counts[name] = {
+            "world": n_params(agent._wm),
+            "actor": n_params(agent._task_behavior.actor),
+            "value": n_params(agent._task_behavior.value),
+        }
+        env.close()
+        c = counts[name]
+        print(
+            f"    {name:<10} gnn={gnn}  world={c['world']:,}  "
+            f"actor={c['actor']:,}  value={c['value']:,}"
+        )
+
+    # 世界模型只由 rssm / head 决定 —— 与 behavior 无关
+    check(
+        "世界模型参数量：idreamer == ac_comm（都不含 WM 的 GNN）",
+        counts["idreamer"]["world"] == counts["ac_comm"]["world"],
+        f"{counts['idreamer']['world']:,} vs {counts['ac_comm']['world']:,}",
+    )
+    check(
+        "世界模型参数量：wm_comm == codreamer（都含 WM 的 GNN）",
+        counts["wm_comm"]["world"] == counts["codreamer"]["world"],
+        f"{counts['wm_comm']['world']:,} vs {counts['codreamer']['world']:,}",
+    )
+    # actor / critic 只由 behavior 决定 —— 与 WM 的 GNN 无关
+    for key in ("actor", "value"):
+        check(
+            f"{key} 参数量：idreamer == wm_comm（都不含 AC 的 GNN）",
+            counts["idreamer"][key] == counts["wm_comm"][key],
+            f"{counts['idreamer'][key]:,} vs {counts['wm_comm'][key]:,}",
+        )
+        check(
+            f"{key} 参数量：ac_comm == codreamer（都含 AC 的 GNN）",
+            counts["ac_comm"][key] == counts["codreamer"][key],
+            f"{counts['ac_comm'][key]:,} vs {counts['codreamer'][key]:,}",
+        )
+    # 存在性对照：GNN 确实加了参数。
+    # 少了这条，上面五条会因为"处处相等"而假通过 —— 比如 GNN 根本没接上时。
+    check(
+        "对照：打开 GNN 确实增加了参数量（否则上面的相等是假通过）",
+        counts["codreamer"]["world"] > counts["idreamer"]["world"]
+        and counts["codreamer"]["actor"] > counts["idreamer"]["actor"],
+        f"world +{counts['codreamer']['world'] - counts['idreamer']['world']:,}  "
+        f"actor +{counts['codreamer']['actor'] - counts['idreamer']['actor']:,}",
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tmp-root", default=None)
@@ -379,6 +462,7 @@ def main() -> int:
     print(f"临时目录 {root}")
     try:
         section_variant_switch()
+        section_ablation_params(root)
         section_pretrain(root)
         section_freeze(root)
         section_execution_graph(root)
