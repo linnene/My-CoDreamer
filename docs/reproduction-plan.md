@@ -473,3 +473,38 @@ held-out 开环隐状态漂移**（那里它给出了 5.9 倍、三 seed 不重�
 3. 冒烟：跑通 IDreamer / CoDreamer 各一小段
 4. **把开环漂移指标接进训练日志**（不只是事后脚本），使它随训练过程出曲线
 5. 三 seed 对照，主看开环漂移，回报作为次要
+
+### VMAS 接线完成（冒烟通过）
+
+`make_env` 的 `vmas` 分支 + `configs.yaml` 的 `vmas_*` 键。冒烟两变体均跑通：
+
+```
+Multi-agent: num_agents=4, teams=1
+train_ratio 512 -> 128 (compensating x4)      ← 多智能体补偿生效
+Action Space Discrete(9)
+Encoder MLP shapes: {'state': (22,)}          ← 18 观测 + 4 one-hot
+
+idreamer   model 16,467,222 / actor 1,055,241 / value 1,181,439
+codreamer  model 20,405,526 / actor 2,368,009 / value 2,494,207
+```
+
+### ⚠️ 两项真实实验前必须处理的实操约束
+
+1. **prefill 必须 ≥ 一局长度。**
+   VMAS 单局 500 步（论文 Table 8），而 replay 只在**整局结束**时才写盘。
+   所以 `--prefill 500` 以下根本攒不出一个完整队伍，`make_graph_dataset` 会直接
+   报 "no complete team in the replay buffer"。
+   冒烟为了快用了 `--vmas_max_steps 20`，**这不是论文设定**。
+
+2. **`batch_size` 的含义在 VMAS 下要重新标定。**
+   它仍然是"队伍数"，但每队 4~5 个 agent、batch 里还要乘 N。
+   flocking（N=4）下 `batch_size=4` 就是 16 条序列。
+   参考：SEG（batch_length 较小）上 12 队可行、16 队 OOM，VMAS 要实测。
+
+### 下一步
+
+- **把 held-out 开环漂移接进训练日志**（目前只有事后脚本
+  `scripts/eval_world_model.py`）。它需要在训练中定期跑一次 open-loop，
+  代价是每隔 `eval_every` 多一批前向，可接受。
+- 三 seed × 两变体对照。**主指标是开环漂移，回报作次要** ——
+  论文自己说 VMAS 上的回报差异可能是随机性。
