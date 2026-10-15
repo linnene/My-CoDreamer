@@ -137,6 +137,8 @@ class VMASEnv:
         self._graph_obs = bool(graph_obs)
         self._seed = seed
         self._rng = np.random.default_rng(seed)
+        # 强制种子（见 seed()）。None = 每局从 _rng 抽，与 seg_gym 的语义一致。
+        self._forced_seed: int | None = None
         self.id = None  # 由 rollout 层赋值（与上游 UUID wrapper 的约定一致）
 
         self._vmas = vmas
@@ -201,6 +203,16 @@ class VMASEnv:
     def comm_radius(self) -> float:
         return self._comm_radius
 
+    def seed(self, seed: int | None) -> None:
+        """强制后续每次 reset 都用同一个种子（seed=None 取消）。
+
+        默认行为（`_seed` 非 None）已经是"每局从自己的 RNG 抽种子"，可重现但
+        每局不同 —— 配对评测要的就是那个。本方法提供的是"每局都一模一样"，
+        用于自检与调试。注意 VMAS 自己的 `seed()` 在**内层**，包装层必须转发，
+        否则调用方（比如 `scripts/eval_policy.py` 之类想固定局的地方）拿不到。
+        """
+        self._forced_seed = None if seed is None else int(seed)
+
     def _graph(self) -> tuple[np.ndarray, np.ndarray]:
         """(adjacency (N,N) float, edge_features (N,N,1) float)。
 
@@ -255,7 +267,9 @@ class VMASEnv:
         VMAS。`env.seed(k)` + `reset()` 是**跨实例可重现**的（已实测），
         所以"同一批固定局"的配对评测成立。
         """
-        if self._seed is not None:
+        if self._forced_seed is not None:
+            self._env.seed(self._forced_seed)
+        elif self._seed is not None:
             self._env.seed(int(self._rng.integers(0, 2**31 - 1)))
         raw = self._raw_reset()
         return self._make_obs(raw, is_first=True, is_terminal=False)
@@ -357,11 +371,19 @@ def _self_test() -> None:
 
         # 每局可确定重现（配对评测的前提）
         env.seed(11)
+        env.reset()
         a = np.stack([x.state.pos[0].cpu().numpy() for x in env._env.agents])
-        env.seed(11)
         env.reset()
         b = np.stack([x.state.pos[0].cpu().numpy() for x in env._env.agents])
         check(f"{task}: seed(k) 后 reset 可重现", bool(np.allclose(a, b)))
+
+        # 默认路径（不强制）：同一实例两次 reset 应该**不同**，否则局没有随机性
+        env.seed(None)
+        env.reset()
+        c = np.stack([x.state.pos[0].cpu().numpy() for x in env._env.agents])
+        env.reset()
+        d = np.stack([x.state.pos[0].cpu().numpy() for x in env._env.agents])
+        check(f"{task}: 默认路径每局不同（有随机性）", not bool(np.allclose(c, d)))
 
         # 关掉 agent 索引后维度变窄
         env2 = VMASEnv(task=task, seed=0, add_agent_index=False)
