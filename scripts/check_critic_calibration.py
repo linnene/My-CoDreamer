@@ -135,7 +135,7 @@ def calibrate(path: pathlib.Path, args) -> dict:
     offset = float(ema[0]) if ema is not None else 0.0
     scale = float(max(ema[1] - ema[0], 1.0)) if ema is not None else 1.0
 
-    vs, gs = [], []
+    vs, gs, ghs = [], [], []
     with torch.no_grad():
         for data in batches:
             obs = wm.preprocess(data)
@@ -161,17 +161,34 @@ def calibrate(path: pathlib.Path, args) -> dict:
             )
             B, T, N = rew.shape
             disc = gamma * cont
+
+            # 全局长度的折扣回报（与上面同一份 200 步的局）
             g = torch.zeros_like(v)
             run = torch.zeros(B, N, dtype=v.dtype, device=v.device)
             for t in reversed(range(T)):
                 run = rew[:, t] + disc[:, t] * run
                 g[:, t] = run
 
+            # 与**训练目标同视界**的回报：critic 学的是 H 步想象轨迹上的 λ-return，
+            # 拿 200 步的全局长回报去比会被反过来说"口径不对"。所以这里再算一份
+            # 只累加 H = imag_horizon 步的，作为对照。
+            Hs = int(getattr(cfg, "imag_horizon", 15))
+            gh = torch.zeros_like(v)
+            for t in range(T):
+                acc = torch.zeros(B, N, dtype=v.dtype, device=v.device)
+                w = torch.ones(B, N, dtype=v.dtype, device=v.device)
+                for k in range(min(Hs, T - t)):
+                    acc = acc + w * rew[:, t + k]
+                    w = w * disc[:, t + k]
+                gh[:, t] = acc
+
             vs.append(v.reshape(-1).cpu())
             gs.append(g.reshape(-1).cpu())
+            ghs.append(gh.reshape(-1).cpu())
 
     V = torch.cat(vs).numpy()
     G = torch.cat(gs).numpy()
+    Gh = torch.cat(ghs).numpy()
 
     def stats(a):
         return (
@@ -179,20 +196,21 @@ def calibrate(path: pathlib.Path, args) -> dict:
             float(np.percentile(a, 5)), float(np.percentile(a, 95)),
         )
 
-    corr = float(np.corrcoef(V, G)[0, 1]) if V.std() > 0 and G.std() > 0 else float("nan")
+    def corr_of(a, b):
+        if a.std() <= 0 or b.std() <= 0:
+            return float("nan")
+        return float(np.corrcoef(a, b)[0, 1])
+
     # 归一化空间：critic 学的就是 (G - offset)/scale
-    Vn, Gn = (V - offset) / scale, (G - offset) / scale
-    corr_n = (
-        float(np.corrcoef(Vn, Gn)[0, 1])
-        if Vn.std() > 0 and Gn.std() > 0 else float("nan")
-    )
+    Vn, Gn, Ghn = (V - offset) / scale, (G - offset) / scale, (Gh - offset) / scale
 
     return {
         "path": str(path), "variant": cfg.comm_variant,
-        "offset": offset, "scale": scale,
-        "V": V, "G": G, "corr_raw": corr, "corr_norm": corr_n,
-        "stats_V": stats(V), "stats_G": stats(G),
-        "stats_Vn": stats(Vn), "stats_Gn": stats(Gn),
+        "offset": offset, "scale": scale, "horizon": Hs,
+        "corr_norm": corr_of(Vn, Gn),          # 对全局长回报
+        "corr_norm_h": corr_of(Vn, Ghn),       # 对训练同视界的短回报
+        "stats_V": stats(V), "stats_G": stats(G), "stats_Gh": stats(Gh),
+        "stats_Vn": stats(Vn), "stats_Gn": stats(Gn), "stats_Ghn": stats(Ghn),
     }
 
 
@@ -215,11 +233,14 @@ def main() -> int:
         r = calibrate(pathlib.Path(path).expanduser(), args)
         out.append((name or path, r))
         print(f"  归一化参数（来自 checkpoint）: offset={r['offset']:.4f} scale={r['scale']:.4f}")
-        print(f"  {'空间':<10}{'mean':>12}{'std':>12}{'p5':>12}{'p95':>12}")
-        for label, s in [("V 原始", r["stats_V"]), ("G 原始", r["stats_G"]),
-                         ("V 归一", r["stats_Vn"]), ("G 归一", r["stats_Gn"])]:
-            print(f"  {label:<10}{s[0]:>12.4f}{s[1]:>12.4f}{s[2]:>12.4f}{s[3]:>12.4f}")
-        print(f"  相关系数 原始空间 {r['corr_raw']:+.4f}   归一化空间 {r['corr_norm']:+.4f}")
+        print(f"  {'空间':<14}{'mean':>12}{'std':>12}{'p5':>12}{'p95':>12}")
+        for label, s in [("V 原始", r["stats_V"]), ("G 全长 原始", r["stats_G"]),
+                         (f"G {r['horizon']}步 原始", r["stats_Gh"]),
+                         ("V 归一", r["stats_Vn"]), ("G 全长 归一", r["stats_Gn"]),
+                         (f"G {r['horizon']}步 归一", r["stats_Ghn"])]:
+            print(f"  {label:<14}{s[0]:>12.4f}{s[1]:>12.4f}{s[2]:>12.4f}{s[3]:>12.4f}")
+        print(f"  相关系数（归一化空间） 对全局长回报 {r['corr_norm']:+.4f}   "
+              f"对训练同视界 {r['corr_norm_h']:+.4f}")
 
     print("\n" + "=" * 74)
     print("怎么读：")
