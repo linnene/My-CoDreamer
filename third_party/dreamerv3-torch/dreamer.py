@@ -685,6 +685,21 @@ def main(config):
             "config": vars(config),
         }
         torch.save(items_to_save, logdir / "latest.pt")
+        # [CoDreamer] 按间隔另存一份**带步号**的 checkpoint。
+        #
+        # 上游只留 latest.pt，每一轮覆盖 —— 事后手里永远只有最终点。于是"某个量随
+        # 训练怎么变"这条曲线拿不到，而那恰恰是判据：模型利用是随训练收紧（自增强
+        # 回路）还是保持不动（静态偏差）、价值膨胀从第几步开始，都需要不止一个点。
+        # 2026-10-15 的诊断就卡在这里，只能拿最终 checkpoint 说话。
+        #
+        # 默认 ckpt_every=0 = 不存，与上游行为逐位一致。按块存，同一块重复保存时
+        # 文件名相同（幂等），不会写重。注意体积：单份约 0.2~0.3 GB。
+        ckpt_every = int(getattr(config, "ckpt_every", 0) or 0)
+        if ckpt_every > 0:
+            mark = (logger.step // ckpt_every) * ckpt_every
+            dst = logdir / f"ckpt_{mark:09d}.pt"
+            if mark > 0 and not dst.exists():
+                torch.save(items_to_save, dst)
 
     # [CoDreamer] 循环结束后再评测一次。
     #

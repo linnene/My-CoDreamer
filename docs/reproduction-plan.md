@@ -238,6 +238,8 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `dreamer.py` | `__call__` 新增 `collect_policy`；`_train` 新增 `update_world_model`；新增 `set_world_model_frozen`；循环后补一次评测；切断时存 `cutoff.pt`；checkpoint 里附带 `config` | 步骤 2 | `# [CoDreamer]` |
 | `tools_marl.py` | 新增 `simulate_imagination`（Phase 2：环境切断后只推进训练节奏）与 `count_dataset_size` | 步骤 2 | `# [CoDreamer]` |
 | `dreamer.py` | `main()` 多智能体时改用 `tools_marl.make_graph_dataset` 构造训练集；`video_pred_log` 与之互斥（未适配会直接报错） | 步骤 2 | `# [CoDreamer]` |
+| `dreamer.py` | 按 `ckpt_every` 另存带步号的 `ckpt_NNNNNNNNN.pt`。上游只留 `latest.pt` 且每轮覆盖，事后只剩最终点——"某个量随训练怎么变"这条曲线因此永远拿不到。2026-10-15 的诊断正是卡在这里：只有最终 checkpoint，无法判断模型利用是随训练收紧还是保持不动。默认 0 = 不存，行为与上游逐位一致 | 诊断（2026-10-15） | `# [CoDreamer]` |
+| `configs.yaml` | 新增 `ckpt_every`（默认 0） | 诊断（2026-10-15） | `# [CoDreamer]` |
 
 新增文件（不在上游清单里，因此不影响"清单不一致 ⟺ 真改了"这个不变式）：
 

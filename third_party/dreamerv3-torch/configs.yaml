@@ -292,6 +292,10 @@ codreamer:
   # 格式：空格分隔的 horizon 列表（空字符串 = 关闭）。
   # 必须 <= batch_length - 2（默认 batch_length=64）。
   openloop_horizons: '1 4 16'
+  # [CoDreamer] 每隔多少个 logger.step 另存一份 ckpt_NNNNNNNNN.pt。
+  # 默认 0 = 不存（与上游逐位一致）。诊断"某个量随训练怎么变"时必须打开 ——
+  # 上游只留 latest.pt、每轮覆盖，事后只剩最终点。单份约 0.2~0.3 GB。
+  ckpt_every: 0
 
 debug:
   debug: True
