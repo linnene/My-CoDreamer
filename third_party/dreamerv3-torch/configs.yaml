@@ -282,6 +282,43 @@ codreamer:
   vmas_add_agent_index: true   # 论文对 IDreamer 的明确要求（非视觉环境拼 one-hot）
   vmas_device: 'cpu'           # VMAS 物理仿真放 CPU，策略仍在 GPU
 
+  # --- Level-Based Foraging（"不通信在信息论上就做不到"的协作游戏）----------------
+  # task 用 --task foraging_demo 指定（suite 是第一段；第二段目前不参与分派，
+  # 因为 LBF 的规格全在下面这些键里）。
+  #
+  # 为什么需要它：VMAS flocking 的观测对邻居完全盲、而奖励是成对距离的 potential
+  # shaping —— 每个 agent 看自己那份就够，通信在信息论上是**冗余**的。LBF 相反：
+  # 观测严格局部（只看 sight 窗口），而等级 2 的食物必须两个 agent 同一时刻 LOAD。
+  # "食物只有 B 看得见、又必须 A 一起搬" 是环境的构造，不是学出来的习惯。
+  # 选型依据与实测数字见 envs/foraging_env.py 的模块 docstring。
+  foraging_num_agents: 3            # players
+  foraging_field_size: 8            # 正方形边长
+  foraging_max_food: 3
+  foraging_sight: 2                 # 视野半边长（切比雪夫方形窗口）
+  # = imag_horizon。实测 15/20/25 的回报几乎相同（0.198/0.200/0.195）——瓶颈是
+  # "找不找得到食物"而不是"时间够不够"。取短局长还有个硬好处：prefill 必须
+  # >= 一局长度，而 replay 只在整局结束时才写盘。
+  foraging_max_steps: 15
+  # false = 食物等级 ∈ {1,2}：等级 1 单人可搬（学习信号），等级 2 必须两人（协作收益）。
+  # true  = 每个食物都必须协作。实测 true 时独立贪心 100 局只拿到 0.02/1.0，
+  #         随机策略恒为 0 —— 任务太硬，低预算下没有学习信号。
+  foraging_force_coop: false
+  foraging_max_player_level: 1
+  foraging_min_player_level: 1
+  foraging_max_food_level: 2        # -1 = 交给 LBF 默认（= 最弱三个 agent 的等级之和）
+  foraging_min_food_level: 1
+  foraging_normalize_reward: true   # LBF 原生，把总回报归一到 1
+  foraging_penalty: 0.0             # 装载失败时的每 agent 惩罚
+  foraging_grid_observation: false  # true = 改用 LBF 的局部网格观测（3×(2s+1)²，维数更大）
+  # 通信半径 C。论文只说"边当且仅当 ||p_i - p_j|| <= C，C 由环境设定"，
+  # 但 LBF 没有这个概念 —— 所以 C 是我们选的。<= 0 = 用默认 max(2, field_size//2 - 1)。
+  # 实测（2000 局）：8x8 上 C=3 平均度 0.92/2、16% 全连通、14% 全断开。
+  # 不要取 C = sight：那样边就等于"互相看得见"，通信只能在双方已经近到能彼此
+  # 看见时发生，对"找不到的食物"毫无帮助。
+  foraging_comm_radius: -1.0
+  foraging_graph_obs: true
+  foraging_add_agent_index: true    # 论文对 IDreamer 的明确要求（非视觉环境拼 one-hot）
+
   # --- held-out 开环预测误差（世界模型"想得准不准"的口径）------------------------
   # 每隔一次评测，用 evaldir 里的 held-out 局算多步开环误差并写进日志：
   # posterior 吃完序列后，**只喂真实动作、不再看观测**，让 prior 往前走。

@@ -102,6 +102,22 @@ class _NoDataset:
         raise RuntimeError("eval_policy 不应触发训练：dataset 被访问了")
 
 
+def _env_spec(cfg) -> tuple:
+    """该 suite 的环境规格键（`seg_*` / `vmas_*` / `foraging_*`），按键名排序。
+
+    **不要写死 `seg_*`。** 这里原先写的是 `cfg.seg_num_agents, cfg.seg_graph_obs,
+    cfg.seg_num_actions, cfg.seg_horizon`，对 seg 之外的 suite 会取值到 yaml 里那份
+    与本次实验无关的默认值 —— 于是两个只差 agent 数的 checkpoint 算出**同一个**
+    config_key，不重建模型，静默地拿错误的架构去评测。日志照样好看。
+    这与本项目记录过的几类静默错误同源（"护栏本身是假的"）。
+
+    改成按 `task` 的第一段取前缀后，任何新 suite 只要把自己的规格键命名成
+    `<suite>_*` 就自动被覆盖。
+    """
+    prefix = cfg.task.split("_", 1)[0] + "_"
+    return tuple((k, getattr(cfg, k)) for k in sorted(vars(cfg)) if k.startswith(prefix))
+
+
 def load_checkpoint(path: pathlib.Path, device: str):
     ckpt = torch.load(path, map_location=device, weights_only=False)
     if "config" not in ckpt:
@@ -264,8 +280,9 @@ def main() -> int:
     config.eval_episode_num = args.episodes
 
     print(
-        f"  环境     task={config.task}  agents={config.seg_num_agents}  "
-        f"horizon={config.seg_horizon}  graph_obs={config.seg_graph_obs}"
+        f"  环境     task={config.task}  agents={config.num_agents}  "
+        f"num_actions={config.num_actions}  "
+        f"spec={dict(_env_spec(config))}"
     )
     print(f"  评测     {args.episodes} agent 局 / checkpoint，环境每次重建（同一批局）")
     print()
@@ -280,8 +297,11 @@ def main() -> int:
             cfg.task, cfg.comm_variant,
             cfg.gnn_layers, cfg.gnn_head_layers, cfg.gnn_behavior_layers,
             cfg.gnn_heads,
-            cfg.seg_num_agents, cfg.seg_graph_obs, cfg.seg_num_actions,
-            cfg.seg_horizon, cfg.dyn_stoch, cfg.dyn_deter, cfg.units,
+            # num_agents / num_actions 是**运行时从环境读出**再写进 checkpoint 的
+            # （dreamer.py:513 与 :543），所以对任何 suite 都反映真实环境。
+            cfg.num_agents, cfg.num_actions,
+            _env_spec(cfg),
+            cfg.dyn_stoch, cfg.dyn_deter, cfg.units,
         )
 
     results = []

@@ -343,6 +343,36 @@ def make_env(config, mode, id):
             max_steps=config.vmas_max_steps,
             device=config.vmas_device,
         )
+    if suite == "foraging":
+        import envs.foraging_env as foraging_env
+
+        # [CoDreamer] Level-Based Foraging 也是队伍级环境，同样直接返回。
+        #
+        # LBF 的全部规格都走 `foraging_*` 键（不像 VMAS 那样写死在包装里），因为
+        # 难度是这组实验的自变量：食物等级决定"必须几个人一起搬"。
+        # 选型依据、C 的实测选值与局长为什么取 15，见 envs/foraging_env.py。
+        return foraging_env.ForagingTeamEnv(
+            num_agents=config.foraging_num_agents,
+            field_size=config.foraging_field_size,
+            max_num_food=config.foraging_max_food,
+            sight=config.foraging_sight,
+            max_steps=config.foraging_max_steps,
+            force_coop=config.foraging_force_coop,
+            max_player_level=config.foraging_max_player_level,
+            max_food_level=config.foraging_max_food_level,
+            min_player_level=config.foraging_min_player_level,
+            min_food_level=config.foraging_min_food_level,
+            normalize_reward=config.foraging_normalize_reward,
+            penalty=config.foraging_penalty,
+            grid_observation=config.foraging_grid_observation,
+            seed=config.seed + id,
+            add_agent_index=config.foraging_add_agent_index,
+            graph_obs=config.foraging_graph_obs,
+            # <= 0 表示"用默认值 max(2, field_size//2 - 1)"；正值才覆盖
+            comm_radius=(
+                None if config.foraging_comm_radius <= 0 else config.foraging_comm_radius
+            ),
+        )
     if suite == "dmc":
         import envs.dmc as dmc
 
