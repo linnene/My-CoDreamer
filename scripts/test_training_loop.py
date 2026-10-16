@@ -574,6 +574,31 @@ def section_comm_reach() -> None:
         f"{r['flip_n'][2]:.4f}（样本 {r['cnt_n'][2]}）",
     )
 
+    # ★ 消融臂不是独立的通信开关 ★
+    #
+    # `action_t` 是下一步 GRU 的**输入**，所以在想象里 actor 的输出也进入世界模型的
+    # 下一步动力学（`_imagine`: action = policy(feat) → img_step(state, action)）。
+    # 于是 ac_comm（rssm=0 head=0 behavior=1）**不等于**"世界模型没有通信"：
+    # RSSM 那层 GNN 确实是恒等，但邻居信息仍经动作通道流进了 deter_{t+1}。
+    #
+    # 这条直接决定怎么读四个消融臂的结果 —— `idreamer / wm_comm / ac_comm /
+    # codreamer` 这组命名读起来像四档独立开关，实际不是。
+    r_ac, lay_ac = run("codreamer", layers=(0, 0, 1))
+    check("ac_comm 的 RSSM 那层确实是恒等（rssm=0）", lay_ac == (0, 0, 1), str(lay_ac))
+    check(
+        "ac_comm: 世界模型的隐状态**仍然**拿到邻居信息（经 action_t）",
+        r_ac["rel"][1] > 0.0,
+        f"1 跳 deter {r_ac['rel'][1]:.4f}（rssm 的 GNN 关着）",
+    )
+    # 注意这里**不能**断言 2 跳恰好为 0：动态图上"图 t 与图 t+1 不同"会让
+    # 图 t 上只隔 1 跳的对落进 2 跳那一行（实测 0.003580）。要干净地判"有没有
+    # 第二条通路"必须用**静态图**（SEG 上同一配置实测恰好 0）。
+    check(
+        "ac_comm: 当前步动作侧在 2 跳恰好没变（actor 只有 1 层 GNN）",
+        float(r_ac["lp_delta"][2]) == 0.0,
+        f"logprob {float(r_ac['lp_delta'][2]):.3e}",
+    )
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
