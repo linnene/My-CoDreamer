@@ -360,6 +360,7 @@ def make_env(config, mode, id):
             max_steps=config.overcooked_max_steps,
             cook_time=config.overcooked_cook_time,
             recipe=tuple(s for s in str(config.overcooked_recipe).split(",") if s),
+            reward_mode=config.overcooked_reward_mode,
             sight=config.overcooked_sight,
             seed=config.seed + id,
             add_agent_index=config.overcooked_add_agent_index,

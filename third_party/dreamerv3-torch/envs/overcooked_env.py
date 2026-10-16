@@ -63,6 +63,26 @@ Overcooked 煮一锅汤默认要 `cook_time`（通常 20）个 tick。若局长�
 把 `recipe=("onion","onion","onion")` 传回来就得到经典设定，但要相应加长局长。
 
 ================================================================================
+⚠️ 奖励很稀疏 —— 训练前必须知道这件事 ⚠️
+================================================================================
+得分要求走完整条链（取洋葱 → 下锅 → 开火 → 等 → 取盘 → 端汤 → 上菜），
+约 25~30 步全对。实测（9x6 三人厨房，35 步）：
+
+    脚本策略（会走对路）    sparse = 20.0    shaped = 8.0
+    随机策略                sparse =  0.0    shaped =  0.0
+
+**接入冒烟里 `train_return` 全程恒为 0（84 局、3040 步）就是这个原因**，
+不是接线坏了。
+
+Overcooked 原生**同时**给两路奖励，本包装两路都读，用 `reward_mode` 选
+（`sparse` 默认 / `shaped` / `sparse+shaped`）。但**shaped 消不掉稀疏性**：
+随机策略在 shaped 上同样恰好为 0，因为走不到锅边就一个子目标都没有。
+它只是让"已经走在正确路上"的策略更早拿到梯度。
+
+要在这款游戏上看到学习曲线，多半得动别的东西（更小的厨房 / 更短的链 /
+更强的 shaping），而不是只把 `reward_mode` 换掉。
+
+================================================================================
 观测：自己写的限视野特征
 ================================================================================
 单 agent 的向量 = 三块拼起来：
@@ -143,6 +163,7 @@ class OvercookedTeamEnv:
         max_steps: int = 35,
         cook_time: int = 5,
         recipe: tuple = ("onion",),
+        reward_mode: str = "sparse",
         sight: int = 2,
         add_agent_index: bool = True,
         graph_obs: bool = False,
@@ -159,6 +180,11 @@ class OvercookedTeamEnv:
         self._add_agent_index = bool(add_agent_index)
         self._graph_obs = bool(graph_obs)
         self._random_start_pos = bool(random_start_pos)
+        if reward_mode not in ("sparse", "shaped", "sparse+shaped"):
+            raise ValueError(
+                f"reward_mode 只能是 sparse / shaped / sparse+shaped，收到 {reward_mode!r}"
+            )
+        self._reward_mode = reward_mode
         # 默认 C = sight：能和看得见的人通信（理由见文件头）
         self._comm_radius = float(sight if comm_radius is None else comm_radius)
         self._seed = seed
@@ -370,7 +396,26 @@ class OvercookedTeamEnv:
 
         joint = [Action.INDEX_TO_ACTION[int(a)] for a in actions]
         self._state, infos = self._mdp.get_state_transition(self._state, joint)
-        reward = np.asarray(infos["sparse_reward_by_agent"], dtype=np.float32).reshape(-1)
+        # ★ 两种奖励都取，按 reward_mode 选 ★
+        #
+        # Overcooked 原生**同时**给两路：上菜才有的稀疏奖励，以及一组子目标奖励
+        # （放洋葱 +3 / 取盘子 +3 / 端起汤 +5，见 `BASE_REW_SHAPING_PARAMS`）。
+        # 早先这里只读了稀疏那一路 —— 那是**接入不完整**，不是有意的设定。
+        #
+        # 实测（9x6 三人厨房，35 步）：
+        #     脚本策略   sparse=20.0   shaped=8.0
+        #     随机策略   sparse= 0.0   shaped=0.0
+        # 所以 shaped 沿正确路径更密，但对**随机探索**同样毫无帮助（走不到锅边就没有
+        # 子目标）—— 稀疏性本身没有被它消除。默认仍是 `sparse`（忠于游戏的目标），
+        # 想试 shaped 时显式打开，别让它静默改变被优化的东西。
+        sparse = np.asarray(infos["sparse_reward_by_agent"], dtype=np.float32).reshape(-1)
+        shaped = np.asarray(infos["shaped_reward_by_agent"], dtype=np.float32).reshape(-1)
+        if self._reward_mode == "sparse":
+            reward = sparse
+        elif self._reward_mode == "shaped":
+            reward = shaped
+        else:
+            reward = sparse + shaped
         assert reward.shape == (n,), (reward.shape, n)
         self._total_reward += float(reward.sum())
         d = bool(self._mdp.is_terminal(self._state) or self._state.timestep >= self._max_steps)
@@ -624,6 +669,59 @@ def _self_test() -> None:
     # 这一条是"短局长可行"的核心：默认 cook_time=20 时同样的流程要 20+ 步纯等待
     check("煮好所需总步数远小于默认 cook_time=20 时的等待量",
           ready_at is not None and ready_at <= 12, f"第 {ready_at} 步")
+
+    # ========================================================================
+    # 奖励：两路都得接上，而且随机策略两路都为 0 这件事要钉住
+    # ========================================================================
+    print()
+    print("  --- 奖励（稀疏性的实测）---")
+    from overcooked_ai_py.mdp.actions import Action as _A
+
+    def put_onion_in_pot(reward_mode):
+        """摆一个确定局面：0 号手持洋葱、面朝锅、按下 INTERACT。返回团队奖励。"""
+        from overcooked_ai_py.mdp.overcooked_mdp import ObjectState
+
+        e = OvercookedTeamEnv(layout="three_player", seed=0,
+                              reward_mode=reward_mode, random_start_pos=False)
+        e.seed(0)
+        e.reset()
+        pot = list(e._mdp.terrain_pos_dict["P"])[0]
+        p0 = e._state.players[0]
+        p0.position = (pot[0], pot[1] + 1)
+        p0.orientation = (0, -1)
+        p0.held_object = ObjectState("onion", p0.position)
+        acts = np.zeros(e.num_agents, dtype=int)
+        acts[0] = _A.ACTION_TO_INDEX[_A.INTERACT]
+        _, r, _, _ = e.step(acts)
+        e.close()
+        return float(r.sum())
+
+    r_sparse = put_onion_in_pot("sparse")
+    r_shaped = put_onion_in_pot("shaped")
+    r_both = put_onion_in_pot("sparse+shaped")
+    check("放洋葱：sparse 不给分（忠于游戏目标）", r_sparse == 0.0, f"{r_sparse:.1f}")
+    check("放洋葱：shaped 给子目标分（PLACEMENT_IN_POT_REW=3）",
+          r_shaped == 3.0, f"{r_shaped:.1f}")
+    check("放洋葱：sparse+shaped = 两者之和", r_both == r_sparse + r_shaped,
+          f"{r_both:.1f} vs {r_sparse + r_shaped:.1f}")
+
+    # 随机策略在两路奖励上都恰好为 0 —— 这是稀疏性的直接证据，也是
+    # "shaped 消不掉稀疏性"那句话的机械形式（走不到锅边就没有子目标）。
+    rng = np.random.default_rng(0)
+    for mode in ("sparse", "shaped"):
+        tot = 0.0
+        e = OvercookedTeamEnv(layout="three_player", seed=7,
+                              reward_mode=mode, random_start_pos=False)
+        e.seed(7)
+        e.reset()
+        for _ in range(35):
+            _, r, done, _ = e.step(rng.integers(0, 6, size=e.num_agents))
+            tot += float(r.sum())
+            if done:
+                break
+        e.close()
+        check(f"随机策略在 reward_mode={mode} 下恰好 0（稀疏性未被 shaped 消掉）",
+              tot == 0.0, f"{tot:.3f}")
 
     env.close()
     env2.close()

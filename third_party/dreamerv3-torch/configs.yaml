@@ -300,6 +300,15 @@ codreamer:
   # 配方。默认单个洋葱，而不是经典的三个 —— 三个洋葱光"去分发器→回锅"就要 30+ 步。
   # 逗号分隔，例如 'onion,onion,onion' 得到经典设定（需相应加长 max_steps）。
   overcooked_recipe: 'onion'
+  # 用哪一路奖励。Overcooked 原生同时给两路：
+  #   sparse        上菜才给（忠于游戏的目标）——**默认**
+  #   shaped        子目标奖励（放洋葱 +3 / 取盘 +3 / 端汤 +5）
+  #   sparse+shaped 两者相加
+  # ⚠️ 实测（9x6 三人厨房，35 步）：脚本策略 sparse=20 / shaped=8；
+  #    **随机策略两路都是 0**。所以 shaped 沿正确路径更密，但**消不掉稀疏性**——
+  #    走不到锅边就一个子目标都没有。冒烟里 train_return 全程为 0 就是这个原因。
+  #    想试就显式打开，别让它静默改变被优化的东西。
+  overcooked_reward_mode: 'sparse'
   # 视野半径。窗口是 (2·sight+1)²，**窗外的格子根本不进观测向量**。
   overcooked_sight: 2
   # 通信半径 C。论文只说"边当且仅当 ‖p_i − p_j‖ ≤ C，C 由环境设定"，
