@@ -479,13 +479,13 @@ def section_comm_reach() -> None:
 
     def run(variant: str, layers=None):
         cfg = copy.deepcopy(load_config(["defaults", "codreamer"]))
-        cfg.task = "foraging_demo"
+        cfg.task = "overcooked_demo"
         cfg.envs = 1
         cfg.comm_variant = variant
-        # 5 个 agent + 小 C，是为了让"2 跳"真的存在；3 agent / C=3 时 2 跳样本太少
-        cfg.foraging_num_agents = 5
-        cfg.foraging_comm_radius = 2.0
-        cfg.foraging_graph_obs = True
+        # agent 数由布局决定（three_player = 3），不能在这里覆盖。
+        # C=2 是实测选的：9x6 三人厨房上平均度 1.00/2、全连通 18%、全断开 9%。
+        cfg.overcooked_comm_radius = 2.0
+        cfg.overcooked_graph_obs = True
         cfg.device = "cpu"          # 与本节其余部分一致，不占 GPU
         cfg.seed = 0
         if layers is not None:

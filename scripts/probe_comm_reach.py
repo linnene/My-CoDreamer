@@ -49,21 +49,23 @@ Dreamer 的 `obs_step` 里，隐状态是这么来的：
 统一用一张图会把实际 1 跳的样本混进"2 跳"那一行，让那一行永远不可能是 0。
 
 ================================================================================
-实测结果（foraging_demo，5 agent，C=2，120 条轨迹 × 6 步，随机初始化）
+实测结果（overcooked_demo，3 agent，C=2，60 条轨迹 × 6 步，随机初始化）
 ================================================================================
     跳数   deter(t+1) 相对变化   动作(t) 翻转   动作(t+1) 翻转   logprob(t) 相对变化   样本数
     --------------------------------------------------------------------------------------
-    1           5.110%           4.19%          5.26%           3.44e-02        2628
-    2           0.112%           0.0000         0.82%         **恰好 0**         774
-    3           恰好 0             0              0           恰好 0           154
+    1           5.557%           6.13%          6.15%           3.07e-02        702
+    2           0.114%           0.0000         0.0000        **恰好 0**         94
     IDreamer 每一格都是**恰好 0**
 
-注意 2 跳那一行的三列**不一致**，这是对的，而且信息量最大：
+注意 1 跳那一行三个口径**都给出一致的"有"**（deter / 翻转率 / 连续量），而 2 跳
+那一行**动作侧恰好是 0、deter 却非零**。这不是矛盾，而是两件事：
 
   - `动作(t)` / `logprob(t)`：**恰好 0** —— actor 只有 1 层 GNN，2 跳外没有通路，
-    掩码是硬的（774 个样本上一个非零值都没有）。
-  - `deter(t+1)` = 0.112%、`动作(t+1)` = 0.82%：**非零**，因为 `deter` 的 reach
-    其实是 **2 跳**，不是 1 跳。
+    掩码是硬的（94 个样本上一个非零值都没有）。
+  - `deter(t+1)` = 0.114%：**非零**，因为 `deter` 的 reach 其实是 **2 跳**，不是 1 跳。
+
+⚠️ **探针免训练，所以这些幅度只是"路径存在"的证据，不是"哪个通道更强"的证据。**
+上表比的是两个**随机初始化**的模型；训练后的幅度不可由它外推。
 
 ### `deter(t+1)` 为什么是 2 跳：两段 GNN 分处两个时刻
 
@@ -129,9 +131,9 @@ IDreamer 逐格严格为零则是这条测量的对照：它证明测到的差�
 
 用法::
 
-    python scripts/probe_comm_reach.py --task foraging_demo
-    python scripts/probe_comm_reach.py --task foraging_demo --variant idreamer
-    python scripts/probe_comm_reach.py --task foraging_demo --gnn 1 0 0   # 只 RSSM 通信
+    python scripts/probe_comm_reach.py --task overcooked_demo
+    python scripts/probe_comm_reach.py --task overcooked_demo --variant idreamer
+    python scripts/probe_comm_reach.py --task overcooked_demo --gnn 1 0 0   # 只 RSSM 通信
 """
 
 from __future__ import annotations
@@ -195,7 +197,7 @@ def collect_trajectories(env, n_episodes: int, horizon: int, seed: int) -> list[
     rng = np.random.default_rng(seed)
     kept = 0
     for ep in range(n_episodes):
-        # vmas_env / foraging_env 提供 seed(k) = "每局都用同一个种子"。
+        # vmas_env / overcooked_env 提供 seed(k) = "每局都用同一个种子"。
         # seg_gym 没有这个方法，退化成用环境自己的 RNG（局仍然各不相同，
         # 只是跨进程不可复现）。探针测的是架构属性，不依赖局的可复现性；
         # 依赖它的地方（scripts/eval_policy.py 的配对评测）走的是另一条路。
@@ -210,7 +212,7 @@ def collect_trajectories(env, n_episodes: int, horizon: int, seed: int) -> list[
             if done:
                 break
         if len(traj) < horizon:
-            # LBF 会在食物搬完时提前终止。少数几条短轨迹会破坏"每个时间步一批"
+            # Overcooked 会在食物搬完时提前终止。少数几条短轨迹会破坏"每个时间步一批"
             # 的等长前提，直接丢掉而不是补齐 —— 补齐会造出并不存在的状态。
             continue
         kept += 1
@@ -443,8 +445,8 @@ def assert_zero_comm_control(layers, res):
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--task", default="foraging_demo",
-                   help="seg_seq / vmas_flocking / foraging_demo")
+    p.add_argument("--task", default="overcooked_demo",
+                   help="seg_seq / vmas_flocking / overcooked_demo")
     p.add_argument("--variant", default="codreamer", choices=["idreamer", "codreamer"])
     p.add_argument("--gnn", type=int, nargs=3, metavar=("RSSM", "HEAD", "BEHAVIOR"),
                    default=None, help="逐段覆盖 GNN 层数（默认跟随 comm_variant）")
@@ -454,13 +456,12 @@ def main() -> int:
                         "（第 0 步的 deter 对观测是常数，最后一步没有下一步可看）")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda")
-    # 这两个是给"把 2 跳的样本量拉起来"用的：8x8/C=3/N=3 时绝大多数 (i,j)
-    # 要么 1 跳要么不连通，2 跳只有 24 个样本 —— 按 6% 的翻转率预期只有 1.4 次，
-    # 测到 0 次的概率约 22%，**不构成"2 跳无影响"的证据**。N=5 配小 C 能把 2 跳
-    # 的样本量提高一个量级。只在 foraging_* 下生效。
-    p.add_argument("--agents", type=int, default=None, help="覆盖 foraging_num_agents")
+    # 通信半径是给"把某几跳的样本量拉起来"用的（切比雪夫距离在整数网格上只取
+    # 整数值，所以 2 与 2.5 等价）。
+    # **没有 --agents**：Overcooked 的 agent 数由布局里的玩家数字决定，与布局
+    # 不一致会直接报错 —— 它不是一个能独立调的量。
     p.add_argument("--comm-radius", type=float, default=None,
-                   help="覆盖 foraging_comm_radius（切比雪夫，整数网格上只有整数档有效）")
+                   help="覆盖 overcooked_comm_radius")
     args = p.parse_args()
 
     if args.horizon < 3:
@@ -477,13 +478,11 @@ def main() -> int:
     if args.gnn is not None:
         cfg.gnn_layers, cfg.gnn_head_layers, cfg.gnn_behavior_layers = args.gnn
     cfg.device = args.device
-    if args.agents is not None:
-        cfg.foraging_num_agents = args.agents
     if args.comm_radius is not None:
-        cfg.foraging_comm_radius = args.comm_radius
+        cfg.overcooked_comm_radius = args.comm_radius
     # 探针**必须有图**（它测的就是图上的传播）。各 suite 的开关键名不同，
     # 统一打开 —— seg 的默认是 false，不打开会在取 obs["adjacency"] 时 KeyError。
-    for key in ("seg_graph_obs", "vmas_graph_obs", "foraging_graph_obs"):
+    for key in ("seg_graph_obs", "vmas_graph_obs", "overcooked_graph_obs"):
         if hasattr(cfg, key):
             setattr(cfg, key, True)
     # ★ 必须调这个 ★ 它是把单一开关展开到三处 GNN 的唯一实现（dreamer.py:434）。

@@ -343,35 +343,32 @@ def make_env(config, mode, id):
             max_steps=config.vmas_max_steps,
             device=config.vmas_device,
         )
-    if suite == "foraging":
-        import envs.foraging_env as foraging_env
+    if suite == "overcooked":
+        import envs.overcooked_env as overcooked_env
 
-        # [CoDreamer] Level-Based Foraging 也是队伍级环境，同样直接返回。
+        # [CoDreamer] Overcooked 也是队伍级环境，同样直接返回。
         #
-        # LBF 的全部规格都走 `foraging_*` 键（不像 VMAS 那样写死在包装里），因为
-        # 难度是这组实验的自变量：食物等级决定"必须几个人一起搬"。
-        # 选型依据、C 的实测选值与局长为什么取 15，见 envs/foraging_env.py。
-        return foraging_env.ForagingTeamEnv(
-            num_agents=config.foraging_num_agents,
-            field_size=config.foraging_field_size,
-            max_num_food=config.foraging_max_food,
-            sight=config.foraging_sight,
-            max_steps=config.foraging_max_steps,
-            force_coop=config.foraging_force_coop,
-            max_player_level=config.foraging_max_player_level,
-            max_food_level=config.foraging_max_food_level,
-            min_player_level=config.foraging_min_player_level,
-            min_food_level=config.foraging_min_food_level,
-            normalize_reward=config.foraging_normalize_reward,
-            penalty=config.foraging_penalty,
-            grid_observation=config.foraging_grid_observation,
+        # 与 VMAS 不同的是：**限视野特征是我们自己写的**，因为官方 featurize
+        # 给的是整个厨房（全可观），那种观测下通信是冗余的
+        # —— 就是 VMAS 上那个"每个 agent 看自己那份就够"的坑。
+        # 见 envs/overcooked_env.py 的模块 docstring。
+        #
+        # 注意 agent 数由**布局**决定（布局里的玩家数字），不能在这里覆盖。
+        return overcooked_env.OvercookedTeamEnv(
+            num_agents=config.overcooked_num_agents,
+            layout=config.overcooked_layout,
+            max_steps=config.overcooked_max_steps,
+            cook_time=config.overcooked_cook_time,
+            recipe=tuple(s for s in str(config.overcooked_recipe).split(",") if s),
+            sight=config.overcooked_sight,
             seed=config.seed + id,
-            add_agent_index=config.foraging_add_agent_index,
-            graph_obs=config.foraging_graph_obs,
-            # <= 0 表示"用默认值 max(2, field_size//2 - 1)"；正值才覆盖
+            add_agent_index=config.overcooked_add_agent_index,
+            graph_obs=config.overcooked_graph_obs,
             comm_radius=(
-                None if config.foraging_comm_radius <= 0 else config.foraging_comm_radius
+                None if config.overcooked_comm_radius <= 0
+                else config.overcooked_comm_radius
             ),
+            random_start_pos=config.overcooked_random_start_pos,
         )
     if suite == "dmc":
         import envs.dmc as dmc

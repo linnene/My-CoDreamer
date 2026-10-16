@@ -103,7 +103,7 @@ class _NoDataset:
 
 
 def _env_spec(cfg) -> tuple:
-    """该 suite 的环境规格键（`seg_*` / `vmas_*` / `foraging_*`），按键名排序。
+    """该 suite 的环境规格键（`seg_*` / `vmas_*` / `overcooked_*`），按键名排序。
 
     **只用于打印，不再用于判结构** —— 判结构改用 `_arch_key`（权重形状表）。
     枚举 config 键这条路已经证明会漏：写死 `seg_*` 时对别的 suite 取到的是

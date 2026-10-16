@@ -242,8 +242,8 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `configs.yaml` | 新增 `ckpt_every`（默认 0） | 诊断（2026-10-15） | `# [CoDreamer]` |
 | `models.py` | `_compute_target` 的 λ-return 自举项可用 `value_bootstrap: 'slow'` 换成慢目标。**上游把在线 critic 同时用作自举与中间混合项**，而慢目标只出现在损失正则里 —— 目标因此没有外部锚。实测症状：`target_mean ≡ value_mean`、V 与真实回报相关 0.03、价值膨胀到每步奖励的 ~1000 倍且不收敛、actor advantage 归零。默认 `'online'` = 与上游逐位一致 | 诊断（2026-10-15） | `# [CoDreamer]` |
 | `configs.yaml` | 新增 `value_bootstrap`（默认 `'online'`） | 诊断（2026-10-15） | `# [CoDreamer]` |
-| `dreamer.py` | `make_env` 增加 `foraging` 分支（队伍级环境，直接返回，不接 gym wrapper 链） | 演示环境（2026-10-16） | `# [CoDreamer]` |
-| `configs.yaml` | `codreamer` 块新增 `foraging_*` 16 个键（num_agents / field_size / max_food / sight / max_steps / force_coop / 等级 / 通信半径 / 图开关 …） | 演示环境（2026-10-16） | `# [CoDreamer]` |
+| `dreamer.py` | `make_env` 增加 `overcooked` 分支（队伍级环境，直接返回，不接 gym wrapper 链） | 演示环境（2026-10-16） | `# [CoDreamer]` |
+| `configs.yaml` | `codreamer` 块新增 `overcooked_*` 10 个键（num_agents / layout / max_steps / cook_time / recipe / sight / 通信半径 / 图开关 …） | 演示环境（2026-10-16） | `# [CoDreamer]` |
 | `scripts/eval_policy.py` | `config_key` 决定"要不要重建模型"。原先写死 `seg_*` 键，对别的 suite 取到的是 yaml 里与本 run 无关的默认值。**改为用 checkpoint 里 `agent_state_dict` 的权重形状表**（`_arch_key`）—— 枚举 config 键这条路过两代都会漏（写死 `seg_*` 漏；按前缀枚举则漏掉任何没被命名成 `<suite>_*` 的结构性旋钮，`seg_obs_mode` 就是差点漏掉的一个），而形状表机械完备：它直接回答"这份权重装不装得进当前模型"。`_env_spec` 保留但**只用于打印** | 演示环境（2026-10-16） | `# [CoDreamer]` |
 
 > **⚠️ `value_bootstrap: 'slow'` 已被量测否定，不要指望它修好任何东西。**
@@ -264,8 +264,8 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `tools_marl.py` | 多智能体收集循环（N 条独立 episode 流）；队伍归组与**图采样器** `sample_episode_graphs` |
 | `networks_gnn.py` | GATv2 层 + 防过平滑跳连；`GraphAggregator(layers=0)` 是严格恒等 |
 | `scripts/test_graph_pipeline.py` | 数据管线 `(B,T,N,·)` 的**数值恒等**验收（阈值 0） |
-| `envs/foraging_env.py` | Level-Based Foraging 的队伍级包装（含自检） |
-| `scripts/test_foraging_wiring.py` | LBF 接入的**集成点**测试（8 节，纯 CPU） |
+| `envs/overcooked_env.py` | Overcooked 的队伍级包装（含自检） |
+| `scripts/test_team_env_wiring.py` | 队伍级环境接入的**集成点**测试（8 节，纯 CPU） |
 | `scripts/probe_comm_reach.py` | **通信探针**：信息从 j 传到 i 吗、走几跳。免训练、无 seed 方差 |
 
 ### 步骤 0 远端实测记录（2026-10-12, Windows + RTX 4060 Laptop 8GB）
@@ -946,51 +946,70 @@ IDreamer 最差 −2.6。CoDreamer 有四次低于 −5.5，IDreamer 零次。
 > 目标：找一个**简单的多人协作游戏**，把算法接上去，让"通信在起作用"这件事
 > 能直接看出来，而不是靠一条噪声很大的回报曲线。分支 `feat/foraging-demo`。
 
-### 选型：Level-Based Foraging（LBF）
+### 选型：Overcooked（胡闹厨房）
 
-判据不是"好不好玩"，而是**不通信在信息论上是否做不到**。VMAS flocking 之所以
-分不出变体，除了有效视界那条机制，还有一个结构原因：它的 lidar 只留非 agent 实体，
-agent 互相完全不可见，而奖励是成对距离的 potential shaping —— **每个 agent 看自己
-那一份观测就够**，通信因此是冗余的。冗余通道只能去拟合噪声。
+**第一步选的是 Level-Based Foraging，被否掉了 —— 理由是用户不认识它。**
+原判据是"不通信在信息论上是否做不到"（VMAS flocking 的 lidar 对邻居完全盲、
+奖励是成对距离的 potential shaping，每个 agent 看自己那份就够，通信因此冗余）。
+LBF 在这条判据上合格，但它是个网格觅食任务，**看不出是个"游戏"**。
+改用 **Overcooked**：洋葱、锅、盘子、上菜口不需要解释，谁在配合、谁在原地打转，
+看回放就分得出 —— 而"直观"本来就是这个任务的第一需求。
 
-LBF 在**源码层面**给出两件 VMAS 没有的事（`lbforaging/foraging/environment.py`）：
+代价是 Overcooked **默认全可观**（官方 featurize 给出整个厨房，含所有玩家的
+位置/朝向/手持），正是要避开的那件事。所以包装**不使用**官方编码，自己写限视野
+特征。这是选型与实现的交换：**用一个家喻户晓的游戏，换一层自己写的观测。**
 
-1. `_make_obs` 只取 `neighborhood(*player.position, sight)` 这个 `(2·sight+1)²`
-   窗口，窗外实体填 `(-1,-1,0)` → **B 看得见的食物，对 A 根本不存在**；
-2. 装载要求**同一时刻**选 LOAD、且都贴在同一食物旁的 agent 等级之和 ≥ 食物等级
-   （:670-700）→ 协作不是学出来的习惯，是环境的构造。
+**只依赖 numpy。** `overcooked_ai_py.mdp.overcooked_env` 顶层 `import gym, tqdm`，
+而本项目装的是 `gym 0.22.0`（vmas 的依赖）；`overcooked_mdp` 只依赖 numpy。
+所以直接驱动 `OvercookedGridworld`，顺带避开官方 `lossless_state_encoding` 里
+`num_players == 2` 的假设 —— 玩家数由**布局里的玩家数字**决定，我自写了三人厨房。
 
-`pip install lbforaging` 只多装 `gymnasium`（实测 dry-run 只有它和
-`Farama-Notices` 两项，不动已装的 `gym 0.22.0`）。
+**两个必须先压下去的默认值**（否则短局长在语义上是空的，与 Melting Pot 被否掉的
+原因是同一个）：
 
-**被实测否掉的两个初始设定：**
+| 默认 | 问题 | 处理 |
+|---|---|---|
+| `cook_time = 20` | 25 步的局长里连一锅汤都煮不完 | 默认取 **5** |
+| 配方 3 个洋葱 | 光"去分发器→回锅"×3 就要 30+ 步 | 默认改为 **1 个洋葱** |
 
-- `force_coop=True`（每个食物都必须两人同搬）：脚本策略 100 局只拿到 **0.02/1.0**，
-  随机策略恒为 0 —— 任务太硬，低预算下**没有学习信号**。这是 SEG"饱和"的反面，
-  两种都会得到"分不出变体"。
-- `C = sight`：边就等于"互相看得见"，通信只能在双方已经近到能彼此看见时发生，
-  对"找不到的食物"毫无帮助。
+压完之后，自检里的完整流程（取洋葱→下锅→开火→煮熟）**第 9 步**就走完。
 
-**默认值（全部实测选的，不是猜的）：**
+**限视野的判据不是"窗口占多少面积"。** 厨房大部分是台面，占面积大不等于看得见锅。
+正确的判据是：站在一个典型位置，**任务相关站点**（锅/洋葱/盘子/上菜口）看得见几个。
+实测：
 
 ```
-食物等级 ∈ {1,2}   等级1 单人可搬（学习信号）；等级2 必须两人（协作收益）
-                  脚本策略实测：等级1 采集率 40%，等级2 **5%** → 95 个百分点的空位
-max_steps = 15     = imag_horizon。15/20/25 的回报 0.198/0.200/0.195 ——
-                   瓶颈是"找不找得到食物"而不是"时间够不够"；短局长还让 prefill 便宜
-C = max(2, field_size//2 − 1)   8x8 → 3。2000 局/格实测：平均度 0.92/2、
-                   全连通 16%、全断开 14%（C=4 时 1.30/2、34%，C=2 时 0.53/2、38%）
+7x5  sight=2   平均看得见 80% 的站点； 80% 的位置至少漏一个   ← 几乎没造出信息差
+9x6  sight=2   平均看得见 49% 的站点；**100%** 的位置至少漏一个   ← 默认
+9x7  sight=2   平均看得见 39% 的站点；100% 的位置至少漏一个
 ```
 
-⚠️ 那次 C 的测量还留了个教训：先抽 300 局读到 C=3 是 1.23/2，抽到 2000 局是
-0.92/2。**图稀疏度这类量必须多种子大样本**，单次抽样会给出一个看起来很确定的错数。
+所以三人厨房定为 **9x6** —— 它是"每一处都漏点什么"的最小尺寸，同时不至于把
+交付流程推到 25 步装不下。
 
-主指标因此不是总回报，而是**等级 2 食物的采集率**——它直接对应"只有协作才拿得到
-的那部分"，且有明确天花板（100%）。
+**C 也是实测选的**（9x6，2000 局随机起局）：
 
-另：`lbforaging` 2.0.0 的 `spawn_players` 有状态泄漏（只在新位置成功时才写
-`player.position`，而 `_is_empty_location` 会拒绝所有玩家占用的格子），导致
-`reset(seed=k)` 不可重现。已在包装层修（`_clear_positions`），不动已安装的包。
+```
+C=1  平均度 0.43/2   全连通  1.9%   全断开 46.4%   ← 太稀
+C=2  平均度 1.00/2   全连通 18.4%   全断开  9.1%   ← 默认（= sight）
+C=3  平均度 1.50/2   全连通 48.4%   全断开  0.0%   ← 太密
+```
+
+**一个不显然的机制**：下锅与开火是**两次交互** —— 只有玩家**空手**对锅交互时
+才会 `begin_cooking()`（`overcooked_mdp.py:1168-1172`）。少了第二步
+`cooking_tick` 永远是 -1，汤永远煮不好。自检断言 tick 从 -1 变为非负，
+并按 tick 判"煮好了"而不是与 0 相等（`begin_cooking` 置 0 之后，**同一步**的
+`cook()` 就把它推到 1）。
+
+**观测的构造原则**：窗口之外的格子**根本不进向量**，而不是填 0 —— 填 0 等于
+告诉 agent"那里是空的"，那也是一种信息。窗外队友只有"不可见"一个比特，其相对
+位置被置零；自检里有反证断言"可见时相对位置必须非零"，否则那条会因为该字段恒为 0
+而假通过。
+
+⚠️ **LBF 已随这次改选整体移除**（`envs/foraging_env.py`、`foraging_*` 配置键、
+`make_env` 分支、接线测试的对应内容）。它测过的东西（观测局部性、协作强制性、
+C 的选法）都已迁到 Overcooked 上重做，探针的实测表也是重新测的 —— **没有留下
+任何一个在已删除环境上测出来的数字**。
 
 ### 通信探针：比"变体间比回报"更合适的仪器
 
@@ -1003,18 +1022,20 @@ C = max(2, field_size//2 − 1)   8x8 → 3。2000 局/格实测：平均度 0.9
 只把 agent j 的**观测内容**换成 agent k 的（保留 j 自己的 one-hot 索引、图不动），
 两次之差就是 j 对 i 的影响。
 
-**实测（foraging_demo，5 agent，C=2，120 条轨迹，随机初始化）：**
+**实测（overcooked_demo，3 agent，C=2，60 条轨迹 × 6 步，随机初始化）：**
 
-| 跳数 | deter(t+1) 相对变化 | 动作(t) 翻转 | 动作(t+1) 翻转 | 样本数 |
-|---|---|---|---|---|
-| IDreamer（对照） | **0** | **0** | **0** | 2628 / 774 / 154 |
-| CoDreamer 1 跳 | 5.11% | 4.19% | 5.26% | 2628 |
-| CoDreamer 2 跳 | 0.112% | **0.0000** | 0.82% | 774 |
-| CoDreamer 3 跳 | **恰好 0** | 0 | 0 | 154 |
+| 跳数 | deter(t+1) 相对变化 | 动作(t) 翻转 | 动作(t+1) 翻转 | logprob(t) 相对变化 | 样本数 |
+|---|---|---|---|---|---|
+| IDreamer（对照） | **0** | **0** | **0** | **0** | 702 / 94 |
+| CoDreamer 1 跳 | 5.557% | 6.13% | 6.15% | 3.07e-02 | 702 |
+| CoDreamer 2 跳 | 0.114% | **0.0000** | 0.0000 | **恰好 0** | 94 |
 
-读法：**actor 那层 GNN 的 reach = 1**（动作(t) 在 2 跳恰好为 0）；**deter(t+1) 的
-reach = 2**、动作(t+1) 也是 2，3 跳归零。IDreamer 逐格严格为零，证明测到的差异
-确实来自通信。在 seg_seq 与 vmas_flocking 上跑同一份探针，得到同一结构。
+读法：**actor 那层 GNN 的 reach = 1**（动作(t) 与 logprob 在 2 跳恰好为 0）；
+**deter(t+1) 的 reach = 2**（见下），3 跳归零。IDreamer 逐格严格为零，证明测到的
+差异确实来自通信。同一份探针在 seg_seq 与 vmas_flocking 上给出同一结构。
+
+⚠️ **探针免训练，所以上表只是"路径存在"的证据，不是"哪个通道更强"的证据** ——
+它比的是两个**随机初始化**的模型，训练后的幅度不可由此外推。
 
 ### ★ `deter(t+1)` 为什么是 2 跳：两段 GNN 分处两个时刻 ★
 
@@ -1043,14 +1064,15 @@ reach = 2**、动作(t+1) 也是 2，3 跳归零。IDreamer 逐格严格为零�
 | **跨时刻复合**：actor@t → `action_t` → RSSM@t+1 | rssm=1 **且** behavior=1 | **出现**（SEG 实测 0.000281） |
 | **分类口径**：图 t 与图 t+1 不同，一对 agent 在图 t 上只隔 1 跳、却被图 t+1 归成 2 跳 | 任何一条单跳通道 | **不出现**（SEG 实测恰好 0） |
 
-判别证据是同一个配置在两个环境上的对比（测试同参数：5 agent / C=2 / 24 局）：
+判别证据是同一个配置在**静态图**与**动态图**上的对比：
 
-    --gnn 0 0 1   SEG（静态图）  2 跳 deter = 恰好 0
-    --gnn 0 0 1   foraging（动态图） 2 跳 deter = 0.003580（60 样本）
+    --gnn 0 0 1   SEG（静态图，局内邻接矩阵不变）    2 跳 deter = 恰好 0（108 样本）
+    --gnn 0 0 1   Overcooked（动态图，agent 一直移动）2 跳 deter = 0.002161（94 样本）
 
-`rssm=0` 时不存在复合通道（没有 RSSM 的 GNN 可接第二棒），所以 foraging 上那
-0.003580 **只能**是分类口径。而 SEG 静态，分类口径不可能产生非零 —— 所以它那个
-0.000281 **只能**是跨时刻复合。两个环境各自排除了一个来源。
+`rssm=0` 时不存在复合通道（没有 RSSM 的 GNN 可接第二棒），所以动态图上那
+0.002161 **只能**是分类口径。而 SEG 静态，分类口径不可能产生非零 —— 所以它
+那个 0.000281（`gnn 1 1 1`）**只能**是跨时刻复合。两个环境各自排除了一个来源，
+**合起来才是决定性的 —— 单个环境分不开这两支。**
 
 **对探针的用法含义**：`deter(t+1)` 那一列在**动态图**上混了两种东西，只有
 **静态图**（SEG）上的 2 跳才能干净地读成"有没有第二条通路"。
@@ -1163,7 +1185,18 @@ agent 在 t 时刻只隔 1 跳，一边又把它们归为 2 跳。**分类与解
 - `cfg.comm_variant` 的 yaml 默认是 `'idreamer'`。不显式设它，`codreamer` 的 run 会
   静默建成 IDreamer，而探针照样打得出一张完整的表 —— 两行一模一样。必须调
   `dreamer.resolve_comm_variant()`（唯一实现），并把参数量当机械证据打出来。
-- `lbforaging.agents.heuristic_agent` 在 2.0.0 里已损坏（import 旧路径
-  `foraging.environment`），基线要自己写脚本策略。
-- LBF 的渲染基于 `pyglet`（非 pygame）且惰性 import，headless 出帧未验证。
-  **演示视频建议自己写 matplotlib 网格渲染器**，几十行，不依赖显示服务器。
+- **Overcooked 里下锅与开火是两次交互**：只有玩家**空手**对锅交互时才
+  `begin_cooking()`（`overcooked_mdp.py:1168-1172`）。少了第二步 `cooking_tick`
+  永远是 -1，汤永远煮不好。而且 `begin_cooking` 置 0 之后**同一步**的 `cook()`
+  就把它推到 1 —— 判"刚开火"要判"不再 idle"，不是判等于 0。
+- **`get_state_transition` 返回 `(new_state, infos)`**，奖励在
+  `infos["sparse_reward_by_agent"]` 里，不是直接返回奖励。只有上菜才给稀疏奖励。
+- **布局的四条边界必须全非空、每行等长、玩家数字恰为 1..n**（`_assert_valid_grid`），
+  否则 `from_grid` 直接抛断言。第一版自写的三人厨房两处都踩了。
+- **`from_grid` 要的是行列表**（`GRID.split("
+")`），传整串会被当成逐字符迭代。
+- `overcooked_env.py` 的 `adjacency` / `edge_features` 是 property，**reset 之前
+  访问会炸**（`self._state` 还是 None），于是 `hasattr` 静默返回 False ——
+  接线测试因此必须在 reset 之后再查接口面。
+- 渲染：官方有 `state_string`（文本）与 pygame 可视化。**演示视频建议自己写
+  matplotlib 版**，不依赖显示服务器。

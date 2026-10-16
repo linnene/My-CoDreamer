@@ -1,9 +1,9 @@
-"""LBF 接入的接线测试 —— 只测集成点，不测模块。
+"""Overcooked 接入的接线测试 —— 只测集成点，不测模块。
 
 ================================================================================
 为什么单独一个文件
 ================================================================================
-`envs/foraging_env.py` 自带自检（`python -m envs.foraging_env`），它测的是
+`envs/overcooked_env.py` 自带自检（`python -m envs.overcooked_env`），它测的是
 **环境本体**：观测是否局部、装载是否需要协作、图是否退化。
 
 但本项目已经有过两次教训（见 docs/reproduction-plan.md §7）：566 行模块级断言
@@ -16,7 +16,7 @@
 ================================================================================
 六条断言
 ================================================================================
-  [1] make_env 对 foraging suite 返回**队伍级环境本身**，不接 gym wrapper 链
+  [1] make_env 对 overcooked suite 返回**队伍级环境本身**，不接 gym wrapper 链
   [2] 接口与 vmas_env / seg_gym 逐条对齐（属性面完全相同）
   [3] obs 字典含 `is_first` / `is_terminal`（models.py 会 assert 这两个键）
   [4] 图批次能还原回 (N, N)：拼接 N 个 agent 的行再 reshape，与 env.adjacency 逐位相同
@@ -26,7 +26,7 @@
 
 用法::
 
-    python scripts/test_foraging_wiring.py
+    python scripts/test_team_env_wiring.py
 """
 
 from __future__ import annotations
@@ -74,11 +74,11 @@ def load_config(config_names: list[str]) -> argparse.Namespace:
     return argparse.Namespace(**defaults)
 
 
-def base_cfg(task: str = "foraging_demo", **overrides):
+def base_cfg(task: str = "overcooked_demo", **overrides):
     cfg = copy.deepcopy(load_config(["defaults", "codreamer"]))
     cfg.task = task
     cfg.envs = 1
-    cfg.foraging_graph_obs = True
+    cfg.overcooked_graph_obs = True
     for k, v in overrides.items():
         setattr(cfg, k, v)
     return cfg
@@ -91,8 +91,8 @@ def section_make_env() -> None:
     env = dreamer_mod.make_env(cfg, "train", 0)
 
     check(
-        "返回的是 ForagingTeamEnv，不是 gym wrapper 链",
-        type(env).__name__ == "ForagingTeamEnv",
+        "返回的是 OvercookedTeamEnv，不是 gym wrapper 链",
+        type(env).__name__ == "OvercookedTeamEnv",
         type(env).__name__,
     )
     # TimeLimit / SelectAction / UUID 都要求 env 是 gym.Env；
@@ -101,7 +101,7 @@ def section_make_env() -> None:
         "没有套上 TimeLimit / SelectAction / UUID",
         not hasattr(env, "_env_max_episode_steps") and not hasattr(env, "_action_space_n"),
     )
-    check("num_agents 可读（dreamer.py 靠它判定多智能体）", env.num_agents == cfg.foraging_num_agents,
+    check("num_agents 可读（dreamer.py 靠它判定多智能体）", env.num_agents == cfg.overcooked_num_agents,
           str(env.num_agents))
     check("有 close()", callable(getattr(env, "close", None)))
     check("有 .id（rollout 层会回写）", hasattr(env, "id"))
@@ -116,11 +116,16 @@ def section_interface_matches_vmas() -> None:
     lbf = dreamer_mod.make_env(base_cfg(), "train", 0)
     vmas = vmas_env.VMASEnv(task="flocking", seed=0, graph_obs=True)
 
+    # adjacency / edge_features 是 property，**要在 reset 之后才有值** ——
+    # reset 之前读会炸在 self._state 为 None 上，于是 hasattr 静默返回 False。
+    # 一个还没 reset 的环境本来也不可用，所以先 reset 再查接口面。
+    lbf.reset()
+    vmas.reset()
     surface = ["num_agents", "observation_space", "action_space", "reset", "step",
                "close", "seed", "adjacency", "edge_features", "spec_edge_feature_dim",
                "graph_obs", "comm_radius"]
     missing = [a for a in surface if not hasattr(lbf, a)]
-    check("LBF 具备 VMAS 的全部接口面", not missing, str(missing))
+    check("Overcooked 具备 VMAS 的全部接口面", not missing, str(missing))
 
     check(
         "observation_space 都是 gym.spaces.Dict",
@@ -145,7 +150,7 @@ def section_interface_matches_vmas() -> None:
 def section_obs_contract() -> None:
     print()
     print("[3] obs 字典满足 models.py 的硬要求")
-    cfg = base_cfg(foraging_add_agent_index=True)
+    cfg = base_cfg(overcooked_add_agent_index=True)
     env = dreamer_mod.make_env(cfg, "train", 0)
     n = env.num_agents
     obs = env.reset()
@@ -177,7 +182,7 @@ def section_obs_contract() -> None:
 def section_graph_roundtrip() -> None:
     print()
     print("[4] 图批次能还原回 (N, N)")
-    cfg = base_cfg(foraging_graph_obs=True)
+    cfg = base_cfg(overcooked_graph_obs=True)
     env = dreamer_mod.make_env(cfg, "train", 0)
     n = env.num_agents
     obs = env.reset()
@@ -237,7 +242,7 @@ def section_encoder_regex() -> None:
 def section_graph_switch() -> None:
     print()
     print("[6] 关掉 graph_obs 后通信链路整体降级为 IDreamer")
-    cfg = base_cfg(foraging_graph_obs=False)
+    cfg = base_cfg(overcooked_graph_obs=False)
     env = dreamer_mod.make_env(cfg, "train", 0)
     obs = env.reset()
 
@@ -344,7 +349,7 @@ def section_eval_policy_key() -> None:
 
 
 def main() -> int:
-    print("LBF 接线测试（纯 CPU，不需要 GPU）")
+    print("Overcooked 接线测试（纯 CPU，不需要 GPU）")
     print("=" * 68)
     section_make_env()
     section_interface_matches_vmas()
