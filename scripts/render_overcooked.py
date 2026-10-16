@@ -36,174 +36,21 @@ D3T = REPO / "third_party" / "dreamerv3-torch"
 sys.path.insert(0, str(D3T))
 
 # 地形 -> 颜色（与 Overcooked 的习惯一致：地板白、台面深、锅黑、洋葱黄绿、盘子蓝、上菜口灰）
-# ---- 配色（暖色木地板 + 深色台面，靠明暗做出一点立体感）----
-FLOOR_A, FLOOR_B = "#efe0c8", "#e6d4b6"      # 交错的地板砖
-COUNTER_TOP, COUNTER_BODY = "#b98d5e", "#8a6039"
-SERVE_TOP, SERVE_BODY = "#cfd4d8", "#9aa2a8"
-POT_BODY, POT_RIM = "#3b3b3b", "#636363"
-ONION, ONION_RING = "#e9c34a", "#c9a02e"
-TOMATO = "#d24a3d"
-DISH, DISH_RIM = "#fbfbfb", "#c9c9c9"
-SOUP_RAW, SOUP_READY = "#d9a24a", "#57b85a"
-AGENT_COLOR = ["#e8552d", "#2f7fd8", "#2fae5a", "#a44fc4", "#e8a02d"]
-SKIN = "#f2c9a0"
-HAT = "#fdfdfd"
-
-
-def _round(ax, x, y, w, h, fc, ec="#00000022", lw=1.0, r=0.12, z=2):
-    import matplotlib.patches as mp
-
-    ax.add_patch(mp.FancyBboxPatch(
-        (x, y), w, h, boxstyle=f"round,pad=0,rounding_size={r}",
-        facecolor=fc, edgecolor=ec, linewidth=lw, zorder=z))
-
-
-def _counter(ax, x, y, top=COUNTER_TOP, body=COUNTER_BODY, z=2):
-    """台面：主体 + 上方一条亮边，看起来像有厚度。"""
-    _round(ax, x + 0.04, y + 0.04, 0.92, 0.92, body, z=z)
-    _round(ax, x + 0.04, y + 0.04, 0.92, 0.30, top, z=z + 0.1)
-
-
-def _onion(ax, cx, cy, s=0.26, z=6):
-    import matplotlib.patches as mp
-
-    ax.add_patch(mp.Circle((cx, cy), s, facecolor=ONION, edgecolor=ONION_RING,
-                           lw=1.2, zorder=z))
-    for k in (0.45, 0.75):
-        ax.add_patch(mp.Arc((cx, cy), 2 * s * k, 2 * s * k, theta1=200, theta2=340,
-                            edgecolor=ONION_RING, lw=0.9, zorder=z + 0.1))
-    ax.plot([cx, cx], [cy + s * 0.9, cy + s * 1.5], color="#4f8a3a", lw=1.6,
-            solid_capstyle="round", zorder=z + 0.2)
-
-
-def _dish(ax, cx, cy, s=0.26, z=6):
-    import matplotlib.patches as mp
-
-    ax.add_patch(mp.Circle((cx, cy), s, facecolor=DISH, edgecolor=DISH_RIM,
-                           lw=1.4, zorder=z))
-    ax.add_patch(mp.Circle((cx, cy), s * 0.55, facecolor="none",
-                           edgecolor=DISH_RIM, lw=0.8, zorder=z + 0.1))
-
-
-def _pot(ax, x, y, soup, z=6):
-    """锅：深色锅身 + 亮色锅沿；有汤时按进度着色，煮好冒泡。"""
-    import matplotlib.patches as mp
-
-    _round(ax, x + 0.10, y + 0.14, 0.80, 0.72, POT_BODY, "#1e1e1e", 1.2, r=0.10, z=z)
-    if soup is not None:
-        ct = soup._cooking_tick
-        ready = ct >= 0 and soup.is_ready
-        frac = 0.0 if ct < 0 else min(1.0, (ct + 1) / max(soup.cook_time, 1))
-        col = SOUP_READY if ready else SOUP_RAW
-        ax.add_patch(mp.Ellipse((x + 0.5, y + 0.52), 0.60, 0.34, facecolor=col,
-                                alpha=0.55 + 0.45 * frac, zorder=z + 0.2))
-        if ready:
-            for dx in (-0.16, 0.02, 0.18):
-                ax.add_patch(mp.Circle((x + 0.5 + dx, y + 0.72), 0.045,
-                                       facecolor="white", alpha=0.85,
-                                       edgecolor="none", zorder=z + 0.3))
-    ax.add_patch(mp.Ellipse((x + 0.5, y + 0.30), 0.86, 0.26, facecolor=POT_RIM,
-                            edgecolor="#2a2a2a", lw=1.0, zorder=z + 0.4))
-
-
-def _chef(ax, x, y, color, facing, z=8):
-    """厨师：身体 + 头 + 白帽子 + 朝向。"""
-    import matplotlib.patches as mp
-
-    ax.add_patch(mp.Circle((x + 0.5, y + 0.58), 0.30, facecolor=color,
-                           edgecolor="#00000033", lw=1.0, zorder=z))
-    ax.add_patch(mp.Circle((x + 0.5, y + 0.52), 0.20, facecolor=SKIN,
-                           edgecolor="#00000022", lw=0.8, zorder=z + 0.1))
-    ax.add_patch(mp.Ellipse((x + 0.5, y + 0.70), 0.34, 0.20, facecolor=HAT,
-                            edgecolor="#00000022", lw=0.8, zorder=z + 0.2))
-    ax.add_patch(mp.Circle((x + 0.5, y + 0.78), 0.13, facecolor=HAT,
-                           edgecolor="#00000022", lw=0.8, zorder=z + 0.2))
-    dx, dy = facing
-    ax.plot([x + 0.5 + 0.24 * dx, x + 0.5 + 0.42 * dx],
-            [y + 0.50 + 0.24 * dy, y + 0.50 + 0.42 * dy],
-            color="#2b2b2b", lw=2.6, solid_capstyle="round", zorder=z + 0.3)
-
-
 def draw_state(ax, env, title: str = "", show_view: bool = True):
-    import matplotlib.patches as mp
+    """把当前状态画成一帧像素画。
 
-    mdp = env._mdp
-    state = env._state
-    grid = mdp.terrain_mtx
-    h, w = len(grid), len(grid[0])
+    实际的绘制在 `scripts/_oc_pixel.py`：那里把精灵烘成一张 RGB 画布，这里只负责
+    `imshow(interpolation="nearest")` —— **最近邻是刻意的**，它保证放大后是硬边
+    像素；用默认插值会把像素糊成渐变，像素画的味道就没了。
+    """
+    from _oc_pixel import canvas_from_state
 
+    canvas = canvas_from_state(env, show_view=show_view)
+    h, w = canvas.shape[:2]
     ax.clear()
-    ax.set_facecolor("#f7f2e7")
-
-    for y in range(h):
-        for x in range(w):
-            ch = grid[y][x]
-            if ch == " " or ch.isdigit():
-                # 地板：交错砖
-                _round(ax, x + 0.02, y + 0.02, 0.96, 0.96,
-                       FLOOR_A if (x + y) % 2 == 0 else FLOOR_B, "none", 0, r=0.06, z=1)
-            elif ch == "S":
-                _counter(ax, x, y, SERVE_TOP, SERVE_BODY)
-                for k in range(3):                    # 上菜口的条纹
-                    ax.plot([x + 0.16, x + 0.84], [y + 0.34 + 0.16 * k] * 2,
-                            color="#ffffff88", lw=1.2, zorder=3)
-            elif ch == "O":
-                _counter(ax, x, y)
-                _onion(ax, x + 0.5, y + 0.58, 0.24, z=4)
-            elif ch == "T":
-                _counter(ax, x, y)
-                ax.add_patch(mp.Circle((x + 0.5, y + 0.58), 0.24, facecolor=TOMATO,
-                                       edgecolor="#a8352a", lw=1.2, zorder=4))
-            elif ch == "D":
-                _counter(ax, x, y)
-                _dish(ax, x + 0.5, y + 0.58, 0.24, z=4)
-            elif ch == "P":
-                _counter(ax, x, y)
-                _pot(ax, x, y, state.objects.get((x, y)))
-            else:
-                _counter(ax, x, y)
-
-    # 台面上散落的物体（不在锅/分发器上的那些）
-    for (x, y), obj in state.objects.items():
-        if grid[y][x] in "OPDS":
-            continue
-        if obj.name.startswith("soup"):
-            _pot(ax, x, y, obj)
-        elif obj.name == "onion":
-            _onion(ax, x + 0.5, y + 0.5, 0.22)
-        elif obj.name == "tomato":
-            ax.add_patch(mp.Circle((x + 0.5, y + 0.5), 0.22, facecolor=TOMATO,
-                                   edgecolor="#a8352a", lw=1.2, zorder=6))
-        elif obj.name == "dish":
-            _dish(ax, x + 0.5, y + 0.5, 0.22)
-
-    for i, p in enumerate(state.players):
-        x, y = p.position
-        c = AGENT_COLOR[i % len(AGENT_COLOR)]
-        if show_view:
-            s = env._sight
-            ax.add_patch(mp.FancyBboxPatch(
-                (x - s + 0.06, y - s + 0.06), 2 * s + 0.88, 2 * s + 0.88,
-                boxstyle="round,pad=0,rounding_size=0.1",
-                facecolor=c, alpha=0.10, edgecolor=c, lw=1.6, ls=(0, (4, 3)),
-                zorder=5))
-        _chef(ax, x, y, c, p.orientation)
-        if p.held_object is not None:
-            hx, hy = x + 0.5 + 0.46 * p.orientation[0], y + 0.46 + 0.46 * p.orientation[1]
-            n = p.held_object.name
-            if n == "onion":
-                _onion(ax, hx, hy, 0.17)
-            elif n == "tomato":
-                ax.add_patch(mp.Circle((hx, hy), 0.17, facecolor=TOMATO,
-                                       edgecolor="#a8352a", lw=1.0, zorder=9))
-            elif n == "dish":
-                _dish(ax, hx, hy, 0.17)
-            else:
-                ax.add_patch(mp.Circle((hx, hy), 0.17, facecolor=SOUP_READY,
-                                       edgecolor="#2f7a33", lw=1.2, zorder=9))
-
-    ax.set_xlim(-0.15, w + 0.15)
-    ax.set_ylim(h + 0.15, -0.15)          # y 轴朝下，与 terrain_mtx 的行序一致
+    ax.imshow(canvas, interpolation="nearest", zorder=1)
+    ax.set_xlim(-0.5, w - 0.5)
+    ax.set_ylim(h - 0.5, -0.5)
     ax.set_aspect("equal")
     ax.set_xticks([])
     ax.set_yticks([])
@@ -380,18 +227,23 @@ class ScriptedPolicy:
                     return d, False
                 return Action.INTERACT, True
         # 否则走到最近的一个可交互格
-        best, bestd = None, None
-        for c in cands:
-            if c in blocked:
-                continue
-            act = _bfs_step(self.mdp, me.position, c, blocked)
-            if act is not None:
-                n = abs(c[0] - me.position[0]) + abs(c[1] - me.position[1])
-                if bestd is None or n < bestd:
-                    best, bestd = act, n
-        if best is None:
-            return Action.STAY, False
-        return best, False
+        # 先把别的 agent 当墙找路；找不到就**无视它们再找一次**。
+        # 这一档很重要：窄厨房里队友经常正好堵在唯一通路上，此时严格绕行会算出
+        # "无路可走"，策略就原地罚站到天荒地老（实测能把成功率压到 1/10）。
+        # 无视别人至少会朝目标挪，堵的人自己会走开。
+        for walls in (blocked, set()):
+            best, bestd = None, None
+            for c in cands:
+                if c in walls:
+                    continue
+                act = _bfs_step(self.mdp, me.position, c, walls)
+                if act is not None:
+                    n = abs(c[0] - me.position[0]) + abs(c[1] - me.position[1])
+                    if bestd is None or n < bestd:
+                        best, bestd = act, n
+            if best is not None:
+                return best, False
+        return Action.STAY, False
 
     def __call__(self):
         from overcooked_ai_py.mdp.actions import Action
@@ -406,29 +258,54 @@ class ScriptedPolicy:
         ]
         empty_pots = [p for p, o in pots.items() if o is None]
 
+        # ── 该有几个人在搬洋葱 ──────────────────────────────────────────────
+        # 这是个**配额**，不是"谁有空谁去"。没有配额的版本（全员无脑搬）会死锁：
+        # 锅满之后每个 agent 都抱着洋葱不放，而手里有洋葱就腾不出手去拿盘子，
+        # 于是没人装盘上菜，整局 0 分。反过来，以前的"奇数号去锅边等"又是人形
+        # 路障。两个极端都试过，所以这里按锅的剩余容量算。
+        #
+        # 只用**可观测量**：锅里的配料数、谁手上拿着洋葱 —— 都是 state 里读得到的。
+        cap = len(getattr(env, "_recipe", ("onion",)))
+        room = sum(cap - len(o.ingredients) for p, o in pots.items()
+                   if o is not None and o.name.startswith("soup") and o.is_idle)
+        room += cap * len(empty_pots)
+        carrying = sum(1 for p in state.players
+                       if p.held_object is not None and p.held_object.name == "onion")
+        need_onion = room - carrying
+        # 能接洋葱的锅：空的，或还没开火且没装满的
+        sockets = [p for p, o in pots.items()
+                   if o is None or (o.name.startswith("soup") and o.is_idle
+                                    and len(o.ingredients) < cap)]
+
         acts = []
         for i, me in enumerate(state.players):
             held = me.held_object.name if me.held_object else None
             if held == "soup":
                 a, _ = self._go_and_interact(i, self.serve[0])
             elif held == "dish":
-                tgt = ready[0] if ready else (self.pots[i % len(self.pots)])
-                a, _ = self._go_and_interact(i, tgt)
+                # 端着盘子但没锅可盛 —— **原地等**，别去锅边挤。
+                # 原来是无脑走到锅边，在 cramped_room（2 人、通道只有一格宽）里
+                # 会把去洋葱的唯一通路堵死，整局 0 分。
+                if ready:
+                    a, _ = self._go_and_interact(i, ready[0])
+                else:
+                    a = Action.STAY
             elif held == "onion":
-                tgt = idle_with_stuff[0] if idle_with_stuff else (
-                    empty_pots[0] if empty_pots else self.pots[i % len(self.pots)]
-                )
-                a, _ = self._go_and_interact(i, tgt)
+                # 锅接得下就送过去；接不下就**原地等**，别抱着洋葱去锅边杵着。
+                # 开火不需要专人：锅里有料之后，空手的 agent 会在下面的
+                # `idle_with_stuff` 分支顺手把它点着。
+                if sockets:
+                    a, _ = self._go_and_interact(i, sockets[0])
+                else:
+                    a = Action.STAY
             elif ready:
                 a, _ = self._go_and_interact(i, self.dishes[i % len(self.dishes)])
             elif idle_with_stuff:
                 a, _ = self._go_and_interact(i, idle_with_stuff[0])
+            elif need_onion > 0:
+                a, _ = self._go_and_interact(i, self.onions[i % len(self.onions)])
             else:
-                # 分工：偶数号取洋葱，奇数号去锅边等着/开火
-                if i % 2 == 0:
-                    a, _ = self._go_and_interact(i, self.onions[i % len(self.onions)])
-                else:
-                    a, _ = self._go_and_interact(i, self.pots[i % len(self.pots)])
+                a = Action.STAY
             acts.append(Action.ACTION_TO_INDEX[a])
         return np.asarray(acts)
 
