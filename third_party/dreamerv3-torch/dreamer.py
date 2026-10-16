@@ -468,10 +468,41 @@ def resolve_comm_variant(config):
     return config
 
 
+def git_sha() -> str | None:
+    """[CoDreamer] 当前代码的 git SHA，取不到就返回 None。
+
+    **来源信息要跟着产物走。** 写在 logdir 旁边的文件不行：目录被 rsync 覆盖时
+    它不会跟着更新，于是会出现"hash 文件说 A、目录里是 B"的静默错配 ——
+    证据看起来干净，采集条件已经变了。写进 config（`vars(config)` 整个进
+    checkpoint）就和产物绑死了。
+
+    这里刻意**失败降级而不是报错**：`/home/wyb/CoDreamer_lbf` 是 rsync 副本、
+    根本没有 .git，而记录来源不该让训练起不来。注意这与台账里那条
+    "远端任务脚本里不要写 git 命令"**不冲突** —— 那说的是拿 git 做**同步决策**
+    （它不知道自己有没有成功），这里只是**记录**。
+
+    只在启动时读一次，训练期间零开销。
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=pathlib.Path(__file__).resolve().parent,
+            capture_output=True, text=True, timeout=10,
+        )
+        return out.stdout.strip() or None if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
 def main(config):
     tools.set_seed_everywhere(config.seed)
     # [CoDreamer] ★ 单一变体开关 ★ —— 见 resolve_comm_variant 的说明。
     resolve_comm_variant(config)
+    # [CoDreamer] 来源信息绑进 config（进而进 checkpoint 的 `vars(config)`）
+    config.git_sha = git_sha()
+    print(f"[CoDreamer] git_sha={config.git_sha}")
 
     if config.deterministic_run:
         tools.enable_deterministic_run()

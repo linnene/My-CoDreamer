@@ -113,10 +113,13 @@ def main() -> int:
     ap.add_argument("--imag-horizon", type=int, default=10)
     ap.add_argument("--iters", type=int, default=10)
     ap.add_argument("--device", default="cuda:0")
+    # 环境可换：脚本只把 env 用来取 spaces 与 num_agents（训练计时用的是合成批次），
+    # 所以换环境不需要改别的东西。默认仍是 VMAS，保持与台账里那组数字可比。
+    ap.add_argument("--task", default="vmas_flocking")
     args = ap.parse_args()
 
     cfg = load_config(["defaults", "codreamer"])
-    cfg.task = "vmas_flocking"
+    cfg.task = args.task
     cfg.comm_variant = "codreamer"
     cfg.gnn_layers = -1
     cfg.gnn_head_layers = -1
@@ -125,6 +128,10 @@ def main() -> int:
     cfg.precision = 16
     cfg.compile = False
     cfg.vmas_max_steps = 50
+    if args.task.startswith("overcooked"):
+        # Overcooked 的观测维是 353（VMAS flocking 只有 22），encoder 第一层
+        # 353→1024 —— 这正是要测的东西，别在这里把它调小。
+        cfg.overcooked_max_steps = 35
     cfg.envs = args.envs
     cfg.batch_size = args.batch_size
     cfg.batch_length = args.batch_length
@@ -149,6 +156,9 @@ def main() -> int:
 
     print("=" * 74)
     print(f"envs={cfg.envs}  N={cfg.num_agents}  B={cfg.batch_size}  T={cfg.batch_length}  H={cfg.imag_horizon}")
+    # 来源信息跟着产物走：rsync 副本没有 .git，那里会打印 None —— 看到 None
+    # 就说明这批数不能对应到某个 commit，引用时要写明这一点。
+    print(f"git_sha = {dreamer_mod.git_sha()}")
     print(f"train_ratio {cfg.train_ratio} -> {tr_compensated}（补偿 x{factor}）")
     print(f"每次更新样本数 = B*T*N = {batch_steps * cfg.num_agents}")
     print(f"** 每 agent 步的更新次数 = {tr_compensated}/{batch_steps} = {ups_per_agent_step:.2f} **")
