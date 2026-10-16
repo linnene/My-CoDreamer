@@ -36,21 +36,96 @@ D3T = REPO / "third_party" / "dreamerv3-torch"
 sys.path.insert(0, str(D3T))
 
 # 地形 -> 颜色（与 Overcooked 的习惯一致：地板白、台面深、锅黑、洋葱黄绿、盘子蓝、上菜口灰）
-TERRAIN_COLOR = {
-    " ": "#ffffff",   # 地板
-    "X": "#4a4a4a",   # 台面
-    "P": "#1a1a1a",   # 锅
-    "O": "#c8b900",   # 洋葱分发器
-    "T": "#cc4444",   # 番茄分发器
-    "D": "#3b7dd8",   # 盘子分发器
-    "S": "#8a8a8a",   # 上菜口
-}
-AGENT_COLOR = ["#e8552d", "#2d7de8", "#2db356", "#b32db3", "#e8a02d"]
-HELD_COLOR = {"onion": "#c8b900", "tomato": "#cc4444", "dish": "#3b7dd8", "soup": "#2db356"}
+# ---- 配色（暖色木地板 + 深色台面，靠明暗做出一点立体感）----
+FLOOR_A, FLOOR_B = "#efe0c8", "#e6d4b6"      # 交错的地板砖
+COUNTER_TOP, COUNTER_BODY = "#b98d5e", "#8a6039"
+SERVE_TOP, SERVE_BODY = "#cfd4d8", "#9aa2a8"
+POT_BODY, POT_RIM = "#3b3b3b", "#636363"
+ONION, ONION_RING = "#e9c34a", "#c9a02e"
+TOMATO = "#d24a3d"
+DISH, DISH_RIM = "#fbfbfb", "#c9c9c9"
+SOUP_RAW, SOUP_READY = "#d9a24a", "#57b85a"
+AGENT_COLOR = ["#e8552d", "#2f7fd8", "#2fae5a", "#a44fc4", "#e8a02d"]
+SKIN = "#f2c9a0"
+HAT = "#fdfdfd"
+
+
+def _round(ax, x, y, w, h, fc, ec="#00000022", lw=1.0, r=0.12, z=2):
+    import matplotlib.patches as mp
+
+    ax.add_patch(mp.FancyBboxPatch(
+        (x, y), w, h, boxstyle=f"round,pad=0,rounding_size={r}",
+        facecolor=fc, edgecolor=ec, linewidth=lw, zorder=z))
+
+
+def _counter(ax, x, y, top=COUNTER_TOP, body=COUNTER_BODY, z=2):
+    """台面：主体 + 上方一条亮边，看起来像有厚度。"""
+    _round(ax, x + 0.04, y + 0.04, 0.92, 0.92, body, z=z)
+    _round(ax, x + 0.04, y + 0.04, 0.92, 0.30, top, z=z + 0.1)
+
+
+def _onion(ax, cx, cy, s=0.26, z=6):
+    import matplotlib.patches as mp
+
+    ax.add_patch(mp.Circle((cx, cy), s, facecolor=ONION, edgecolor=ONION_RING,
+                           lw=1.2, zorder=z))
+    for k in (0.45, 0.75):
+        ax.add_patch(mp.Arc((cx, cy), 2 * s * k, 2 * s * k, theta1=200, theta2=340,
+                            edgecolor=ONION_RING, lw=0.9, zorder=z + 0.1))
+    ax.plot([cx, cx], [cy + s * 0.9, cy + s * 1.5], color="#4f8a3a", lw=1.6,
+            solid_capstyle="round", zorder=z + 0.2)
+
+
+def _dish(ax, cx, cy, s=0.26, z=6):
+    import matplotlib.patches as mp
+
+    ax.add_patch(mp.Circle((cx, cy), s, facecolor=DISH, edgecolor=DISH_RIM,
+                           lw=1.4, zorder=z))
+    ax.add_patch(mp.Circle((cx, cy), s * 0.55, facecolor="none",
+                           edgecolor=DISH_RIM, lw=0.8, zorder=z + 0.1))
+
+
+def _pot(ax, x, y, soup, z=6):
+    """锅：深色锅身 + 亮色锅沿；有汤时按进度着色，煮好冒泡。"""
+    import matplotlib.patches as mp
+
+    _round(ax, x + 0.10, y + 0.14, 0.80, 0.72, POT_BODY, "#1e1e1e", 1.2, r=0.10, z=z)
+    if soup is not None:
+        ct = soup._cooking_tick
+        ready = ct >= 0 and soup.is_ready
+        frac = 0.0 if ct < 0 else min(1.0, (ct + 1) / max(soup.cook_time, 1))
+        col = SOUP_READY if ready else SOUP_RAW
+        ax.add_patch(mp.Ellipse((x + 0.5, y + 0.52), 0.60, 0.34, facecolor=col,
+                                alpha=0.55 + 0.45 * frac, zorder=z + 0.2))
+        if ready:
+            for dx in (-0.16, 0.02, 0.18):
+                ax.add_patch(mp.Circle((x + 0.5 + dx, y + 0.72), 0.045,
+                                       facecolor="white", alpha=0.85,
+                                       edgecolor="none", zorder=z + 0.3))
+    ax.add_patch(mp.Ellipse((x + 0.5, y + 0.30), 0.86, 0.26, facecolor=POT_RIM,
+                            edgecolor="#2a2a2a", lw=1.0, zorder=z + 0.4))
+
+
+def _chef(ax, x, y, color, facing, z=8):
+    """厨师：身体 + 头 + 白帽子 + 朝向。"""
+    import matplotlib.patches as mp
+
+    ax.add_patch(mp.Circle((x + 0.5, y + 0.58), 0.30, facecolor=color,
+                           edgecolor="#00000033", lw=1.0, zorder=z))
+    ax.add_patch(mp.Circle((x + 0.5, y + 0.52), 0.20, facecolor=SKIN,
+                           edgecolor="#00000022", lw=0.8, zorder=z + 0.1))
+    ax.add_patch(mp.Ellipse((x + 0.5, y + 0.70), 0.34, 0.20, facecolor=HAT,
+                            edgecolor="#00000022", lw=0.8, zorder=z + 0.2))
+    ax.add_patch(mp.Circle((x + 0.5, y + 0.78), 0.13, facecolor=HAT,
+                           edgecolor="#00000022", lw=0.8, zorder=z + 0.2))
+    dx, dy = facing
+    ax.plot([x + 0.5 + 0.24 * dx, x + 0.5 + 0.42 * dx],
+            [y + 0.50 + 0.24 * dy, y + 0.50 + 0.42 * dy],
+            color="#2b2b2b", lw=2.6, solid_capstyle="round", zorder=z + 0.3)
 
 
 def draw_state(ax, env, title: str = "", show_view: bool = True):
-    import matplotlib.patches as mpatches
+    import matplotlib.patches as mp
 
     mdp = env._mdp
     state = env._state
@@ -58,83 +133,82 @@ def draw_state(ax, env, title: str = "", show_view: bool = True):
     h, w = len(grid), len(grid[0])
 
     ax.clear()
+    ax.set_facecolor("#f7f2e7")
+
     for y in range(h):
         for x in range(w):
-            ax.add_patch(
-                mpatches.Rectangle(
-                    (x, y), 1, 1, facecolor=TERRAIN_COLOR.get(grid[y][x], "#ffffff"),
-                    edgecolor="#cccccc", lw=0.5,
-                )
-            )
-
-    # 台面上的东西
-    for (x, y), obj in state.objects.items():
-        name = obj.name
-        if name.startswith("soup"):
-            # 锅里：按烹饪进度填充。
-            # ⚠️ `obj.cook_time` 在汤**还没开火**时会抛 ValueError
-            # （"Recipe is not determined until soup begins cooking"）——
-            # 未开火时配方还没定下来。所以只有非 idle 才去读它。
-            ct = obj._cooking_tick
-            if ct < 0:
-                total, frac = 0, 0.0
+            ch = grid[y][x]
+            if ch == " " or ch.isdigit():
+                # 地板：交错砖
+                _round(ax, x + 0.02, y + 0.02, 0.96, 0.96,
+                       FLOOR_A if (x + y) % 2 == 0 else FLOOR_B, "none", 0, r=0.06, z=1)
+            elif ch == "S":
+                _counter(ax, x, y, SERVE_TOP, SERVE_BODY)
+                for k in range(3):                    # 上菜口的条纹
+                    ax.plot([x + 0.16, x + 0.84], [y + 0.34 + 0.16 * k] * 2,
+                            color="#ffffff88", lw=1.2, zorder=3)
+            elif ch == "O":
+                _counter(ax, x, y)
+                _onion(ax, x + 0.5, y + 0.58, 0.24, z=4)
+            elif ch == "T":
+                _counter(ax, x, y)
+                ax.add_patch(mp.Circle((x + 0.5, y + 0.58), 0.24, facecolor=TOMATO,
+                                       edgecolor="#a8352a", lw=1.2, zorder=4))
+            elif ch == "D":
+                _counter(ax, x, y)
+                _dish(ax, x + 0.5, y + 0.58, 0.24, z=4)
+            elif ch == "P":
+                _counter(ax, x, y)
+                _pot(ax, x, y, state.objects.get((x, y)))
             else:
-                total = max(obj.cook_time, 1)
-                frac = min(1.0, (ct + 1) / total)
-            ax.add_patch(
-                mpatches.Rectangle(
-                    (x + 0.15, y + 0.15), 0.7, 0.7,
-                    facecolor="#2db356" if obj.is_ready else "#9ad3ae", lw=0,
-                )
-            )
-            # 显示钳到 total：ct 会推到 cook_time 就停，+1 只是为了让"刚开火"不显示 0
-            ax.text(x + 0.5, y + 0.5, f"{min(ct + 1, total)}/{total}",
-                    ha="center", va="center", fontsize=7, color="#0a3a1a")
-        else:
-            ax.add_patch(
-                mpatches.Circle(
-                    (x + 0.5, y + 0.5), 0.22,
-                    facecolor=HELD_COLOR.get(name, "#888888"), lw=0,
-                )
-            )
+                _counter(ax, x, y)
 
-    # agent
+    # 台面上散落的物体（不在锅/分发器上的那些）
+    for (x, y), obj in state.objects.items():
+        if grid[y][x] in "OPDS":
+            continue
+        if obj.name.startswith("soup"):
+            _pot(ax, x, y, obj)
+        elif obj.name == "onion":
+            _onion(ax, x + 0.5, y + 0.5, 0.22)
+        elif obj.name == "tomato":
+            ax.add_patch(mp.Circle((x + 0.5, y + 0.5), 0.22, facecolor=TOMATO,
+                                   edgecolor="#a8352a", lw=1.2, zorder=6))
+        elif obj.name == "dish":
+            _dish(ax, x + 0.5, y + 0.5, 0.22)
+
     for i, p in enumerate(state.players):
         x, y = p.position
         c = AGENT_COLOR[i % len(AGENT_COLOR)]
         if show_view:
             s = env._sight
-            ax.add_patch(
-                mpatches.Rectangle(
-                    (x - s, y - s), 2 * s + 1, 2 * s + 1,
-                    facecolor=c, alpha=0.10, edgecolor=c, lw=1.2, ls="--",
-                )
-            )
-        ax.add_patch(
-            mpatches.Circle(
-                (x + 0.5, y + 0.5), 0.34, facecolor=c, lw=1.0, edgecolor="white",
-            )
-        )
-        dx, dy = p.orientation
-        ax.annotate("", xy=(x + 0.5 + 0.36 * dx, y + 0.5 + 0.36 * dy),
-                    xytext=(x + 0.5, y + 0.5),
-                    arrowprops=dict(arrowstyle="-|>", color="white", lw=1.6))
-        ax.text(x + 0.5, y + 0.12, str(i), ha="center", va="center",
-                fontsize=8, color="white", fontweight="bold")
+            ax.add_patch(mp.FancyBboxPatch(
+                (x - s + 0.06, y - s + 0.06), 2 * s + 0.88, 2 * s + 0.88,
+                boxstyle="round,pad=0,rounding_size=0.1",
+                facecolor=c, alpha=0.10, edgecolor=c, lw=1.6, ls=(0, (4, 3)),
+                zorder=5))
+        _chef(ax, x, y, c, p.orientation)
         if p.held_object is not None:
-            ax.add_patch(
-                mpatches.Circle(
-                    (x + 0.5, y + 0.5), 0.15,
-                    facecolor=HELD_COLOR.get(p.held_object.name, "#888888"),
-                    lw=1.0, edgecolor="white",
-                )
-            )
+            hx, hy = x + 0.5 + 0.46 * p.orientation[0], y + 0.46 + 0.46 * p.orientation[1]
+            n = p.held_object.name
+            if n == "onion":
+                _onion(ax, hx, hy, 0.17)
+            elif n == "tomato":
+                ax.add_patch(mp.Circle((hx, hy), 0.17, facecolor=TOMATO,
+                                       edgecolor="#a8352a", lw=1.0, zorder=9))
+            elif n == "dish":
+                _dish(ax, hx, hy, 0.17)
+            else:
+                ax.add_patch(mp.Circle((hx, hy), 0.17, facecolor=SOUP_READY,
+                                       edgecolor="#2f7a33", lw=1.2, zorder=9))
 
-    ax.set_xlim(-0.1, w + 0.1)
-    ax.set_ylim(h + 0.1, -0.1)          # y 轴朝下，与 terrain_mtx 的行序一致
+    ax.set_xlim(-0.15, w + 0.15)
+    ax.set_ylim(h + 0.15, -0.15)          # y 轴朝下，与 terrain_mtx 的行序一致
     ax.set_aspect("equal")
     ax.set_xticks([])
     ax.set_yticks([])
+    for sp in ax.spines.values():
+        sp.set_visible(False)
     ax.set_title(title, fontsize=10)
 
 
