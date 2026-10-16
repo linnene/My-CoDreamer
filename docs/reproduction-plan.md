@@ -244,7 +244,6 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `configs.yaml` | 新增 `value_bootstrap`（默认 `'online'`） | 诊断（2026-10-15） | `# [CoDreamer]` |
 | `dreamer.py` | `make_env` 增加 `overcooked` 分支（队伍级环境，直接返回，不接 gym wrapper 链） | 演示环境（2026-10-16） | `# [CoDreamer]` |
 | `configs.yaml` | `codreamer` 块新增 `overcooked_*` 10 个键（num_agents / layout / max_steps / cook_time / recipe / sight / 通信半径 / 图开关 …） | 演示环境（2026-10-16） | `# [CoDreamer]` |
-| `scripts/eval_policy.py` | `config_key` 决定"要不要重建模型"。原先写死 `seg_*` 键，对别的 suite 取到的是 yaml 里与本 run 无关的默认值。**改为用 checkpoint 里 `agent_state_dict` 的权重形状表**（`_arch_key`）—— 枚举 config 键这条路过两代都会漏（写死 `seg_*` 漏；按前缀枚举则漏掉任何没被命名成 `<suite>_*` 的结构性旋钮，`seg_obs_mode` 就是差点漏掉的一个），而形状表机械完备：它直接回答"这份权重装不装得进当前模型"。`_env_spec` 保留但**只用于打印** | 演示环境（2026-10-16） | `# [CoDreamer]` |
 
 > **⚠️ `value_bootstrap: 'slow'` 已被量测否定，不要指望它修好任何东西。**
 > 实测慢目标与在线 critic 只差 **0.19%（IDreamer）/ 0.56%（CoDreamer）**，
@@ -264,9 +263,11 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `tools_marl.py` | 多智能体收集循环（N 条独立 episode 流）；队伍归组与**图采样器** `sample_episode_graphs` |
 | `networks_gnn.py` | GATv2 层 + 防过平滑跳连；`GraphAggregator(layers=0)` 是严格恒等 |
 | `scripts/test_graph_pipeline.py` | 数据管线 `(B,T,N,·)` 的**数值恒等**验收（阈值 0） |
+| `envs/vmas_env.py` | VMAS 队伍级包装（先前只在正文里提过，从未登记进本表） |
 | `envs/overcooked_env.py` | Overcooked 的队伍级包装（含自检） |
 | `scripts/test_team_env_wiring.py` | 队伍级环境接入的**集成点**测试（8 节，纯 CPU） |
 | `scripts/render_overcooked.py` | Overcooked 回放到 GIF/MP4（matplotlib Agg，不依赖显示服务器） |
+| `scripts/check_change_list.py` | 「改动清单」与真实 `git diff` 的机械比对（把人工纪律变成检查） |
 | `scripts/probe_comm_reach.py` | **通信探针**：信息从 j 传到 i 吗、走几跳。免训练、无 seed 方差 |
 
 ### 步骤 0 远端实测记录（2026-10-12, Windows + RTX 4060 Laptop 8GB）
@@ -1020,6 +1021,27 @@ C=3  平均度 1.50/2   全连通 48.4%   全断开  0.0%   ← 太密
 `make_env` 分支、接线测试的对应内容）。它测过的东西（观测局部性、协作强制性、
 C 的选法）都已迁到 Overcooked 上重做，探针的实测表也是重新测的 —— **没有留下
 任何一个在已删除环境上测出来的数字**。
+
+### 顺带修掉的一处静默缺陷：`eval_policy` 的重建判据
+
+`scripts/eval_policy.py` 是**我们自己的**代码，不在上游改动清单的管辖范围里
+（那张表只登记 `third_party/dreamerv3-torch/`），所以记在这里。
+
+`config_key` 决定"要不要重建模型"。它原先写死 `seg_*` 键，对别的 suite 取到的是
+yaml 里与本 run 无关的默认值。**两代枚举法都漏**：
+
+| 代 | 漏在哪 |
+|---|---|
+| 写死 `seg_*` | 对别的 suite 取到无关默认值 |
+| 按 task 前缀枚举 | 只覆盖被命名成 `<suite>_*` 的旋钮，**没这个名字的结构性旋钮全漏** |
+
+**现在的做法是用 checkpoint 里 `agent_state_dict` 的权重形状表**（`_arch_key`）。
+它机械完备：直接回答"这份权重装不装得进当前模型"，而那正是重建决策唯一要问的
+问题。枚举法只能覆盖"想得到的那些"，形状表不会漏。
+
+（这条是 Maindev 从"你举的失效场景不成立 + 你的修法补不上真正的缺口"里逼出来的。
+他那个具体例子 `seg_obs_mode` 其实已被我的前缀版覆盖，但**他的核心判断对**：
+枚举这个做法本身会一直漏。）
 
 ### 通信探针：比"变体间比回报"更合适的仪器
 
