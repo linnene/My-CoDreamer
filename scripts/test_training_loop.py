@@ -452,6 +452,129 @@ def section_ablation_params(root: pathlib.Path) -> None:
     )
 
 
+def section_comm_reach() -> None:
+    """[7] 通信的 **reach**：信息走几跳。
+
+    与 [4]/[5] 的分工，值得写清楚，因为两者抓的错不一样：
+
+        [4]/[5]  测**敏感性** —— 改邻接矩阵，动作分布变不变
+        [7]      测**结构**   —— 哪几跳有、哪几跳无
+
+    后者能抓住前者抓不到的错：**GNN 接错了位置，但仍对邻接矩阵敏感**。
+    比如把聚合插在 encoder 之后、或者只接了一半的 agent，敏感性照样是有的。
+
+    而且它是二值判据（1 跳有 / 2 跳恰好没有），因此跨环境可比、不随 seed 漂、
+    不需要噪声本底 —— 这正是这个项目里"回报对比"缺的那几样性质。
+    实现复用 `scripts/probe_comm_reach.py`，不在这里复制一份测量逻辑。
+
+    为什么放在回路测试而不是留成独立脚本：台账记着，566 行模块级断言全绿却漏掉
+    两个致命 bug，**因为它们长在集成点上**，而通信接线就是集成点（执行路径的三次
+    形状 bug 全出在那里）。独立脚本要靠人记得跑，这一层不行。
+    """
+    print()
+    print("[7] 通信的 reach（结构，不是敏感性）")
+    sys.path.insert(0, str(REPO / "scripts"))
+    import probe_comm_reach as probe_mod
+    from eval_policy import CaptureLogger, _NoDataset
+
+    def run(variant: str, layers=None):
+        cfg = copy.deepcopy(load_config(["defaults", "codreamer"]))
+        cfg.task = "foraging_demo"
+        cfg.envs = 1
+        cfg.comm_variant = variant
+        # 5 个 agent + 小 C，是为了让"2 跳"真的存在；3 agent / C=3 时 2 跳样本太少
+        cfg.foraging_num_agents = 5
+        cfg.foraging_comm_radius = 2.0
+        cfg.foraging_graph_obs = True
+        cfg.device = "cpu"          # 与本节其余部分一致，不占 GPU
+        cfg.seed = 0
+        if layers is not None:
+            cfg.gnn_layers, cfg.gnn_head_layers, cfg.gnn_behavior_layers = layers
+        dreamer_mod.resolve_comm_variant(cfg)
+        env = dreamer_mod.make_env(cfg, "eval", 0)
+        cfg.num_agents = env.num_agents
+        cfg.num_actions = env.action_space.n
+        torch.manual_seed(0)
+        agent = dreamer_mod.Dreamer(
+            env.observation_space, env.action_space, cfg,
+            CaptureLogger(), _NoDataset(),
+        ).to(cfg.device)
+        agent.requires_grad_(requires_grad=False)
+        agent.eval()
+        out = probe_mod.probe(
+            agent, env, device=cfg.device, n_episodes=24, horizon=4, seed=0
+        )
+        env.close()
+        got = (cfg.gnn_layers, cfg.gnn_head_layers, cfg.gnn_behavior_layers)
+        return out, got
+
+    # ---- 对照：一层 GNN 都没有 → 任何跨 agent 影响必须**恰好**为 0 ----
+    r0, lay0 = run("idreamer")
+    check("idreamer 三处 GNN 层数都是 0", lay0 == (0, 0, 0), str(lay0))
+    check(
+        "idreamer: deter 变化在每一跳上恰好为 0",
+        float(np.max(r0["det_delta"])) == 0.0,
+        f"max={float(np.max(r0['det_delta'])):.3e}",
+    )
+    check(
+        "idreamer: 动作侧（翻转率与 logprob）在每一跳上恰好为 0",
+        float(np.max(r0["flip"])) == 0.0
+        and float(np.max(r0["flip_n"])) == 0.0
+        and float(np.max(r0["lp_delta"])) == 0.0,
+    )
+
+    # ---- CoDreamer：actor 那层 GNN 的 reach 恰好 1 跳 ----
+    r, lay = run("codreamer")
+    check("codreamer 三处 GNN 层数都是 1", lay == (1, 1, 1), str(lay))
+
+    # 样本存在性守卫。**这条是必需的不是装饰**：下面两条"恰好为 0"的断言在
+    # 没有对应样本时是**空断言**，会假通过 —— 台账里"护栏本身是假的"那一类。
+    check("1 跳样本存在", r["lp_n"][1] > 0, f"{r['lp_n'][1]}")
+    check(
+        "2 跳样本存在（否则下一条是空断言）",
+        r["lp_n"].shape[0] > 2 and r["lp_n"][2] > 0,
+        f"{r['lp_n'].tolist()}",
+    )
+
+    # ★ 结构性主张落在**连续量**上 ★
+    #
+    # 早先这条用的是翻转率。翻转率是阈值化的量（argmax 会把弱影响吃掉），
+    # 所以"没测到翻转"既可能是"真的没有通路"，也可能只是样本不够 ——
+    # 那就得靠样本量论证，而 (i,j) 对在同一局里共享状态、并不独立，
+    # 有效样本量最多是 局数 × 可用 t 数，设计效应可达数倍。
+    #
+    # logprob 是连续量，于是"恰好没变"是一条 **float 精确**断言：
+    # 若 2 跳真有通路，第一个样本就会给出非零值（浮点不会把真实依赖舍入成 0）。
+    # 独立性、设计效应、簇相关统统不进入 —— 问题被消掉，而不是被修好。
+    check(
+        "1 跳：信息确实传过去了（deter 变、logprob 变、动作翻）",
+        r["rel"][1] > 0.0 and r["lp_delta"][1] > 0.0 and r["flip"][1] > 0.0,
+        f"deter {r['rel'][1]:.4f}  logprob {r['lp_delta'][1]:.3e}  "
+        f"翻转 {r['flip'][1]:.4f}",
+    )
+    # ⚠️ 这条失败时的**第一问是「是不是有人把层数改成 2 了」**，不是
+    # 「是不是掩码泄漏了」—— 它本质是一句关于 GNN 层数的断言：1 层的 reach
+    # 到不了 2 跳。别去 masked_fill 那几行找一个并不存在的 bug。
+    # 前提：这个 0 来自**硬掩码**（结构性无通路），不是算术相消。
+    # 若将来有人把硬掩码换成软门控，这条会失败 —— **那时失败是正确行为**。
+    check(
+        "2 跳：当前步动作侧**恰好**没变（actor 那层只传 1 跳）",
+        float(r["lp_delta"][2]) == 0.0 and float(r["flip"][2]) == 0.0,
+        f"logprob {float(r['lp_delta'][2]):.3e}  翻转 {float(r['flip'][2]):.4f}",
+    )
+    check(
+        "3 跳：下一步 deter 恰好为 0（RSSM 那层也只传 1 跳）",
+        r["det_delta"].shape[0] <= 3 or float(r["det_delta"][3]) == 0.0,
+        f"{float(r['det_delta'][3]):.3e}",
+    )
+    # 复合：RSSM 一跳 + actor 一跳 = 2 跳。下一步的动作在 2 跳上应当仍有影响。
+    check(
+        "复合后 2 跳仍有影响（RSSM 1 跳 + actor 1 跳）",
+        r["flip_n"][2] > 0.0,
+        f"{r['flip_n'][2]:.4f}（样本 {r['cnt_n'][2]}）",
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tmp-root", default=None)
@@ -466,6 +589,7 @@ def main() -> int:
         section_pretrain(root)
         section_freeze(root)
         section_execution_graph(root)
+        section_comm_reach()
     finally:
         if args.tmp_root is None:
             shutil.rmtree(root, ignore_errors=True)

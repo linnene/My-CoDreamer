@@ -51,24 +51,69 @@ Dreamer 的 `obs_step` 里，隐状态是这么来的：
 ================================================================================
 实测结果（foraging_demo，5 agent，C=2，120 条轨迹 × 6 步，随机初始化）
 ================================================================================
-    跳数   deter(t+1) 相对变化   动作(t) 翻转   动作(t+1) 翻转    样本数
-    ------------------------------------------------------------------
-    1           5.110%           4.19%          5.26%          2628
-    2           0.112%           0.0000         0.82%           774
-    3           恰好 0             0              0             154
+    跳数   deter(t+1) 相对变化   动作(t) 翻转   动作(t+1) 翻转   logprob(t) 相对变化   样本数
+    --------------------------------------------------------------------------------------
+    1           5.110%           4.19%          5.26%           3.44e-02        2628
+    2           0.112%           0.0000         0.82%         **恰好 0**         774
+    3           恰好 0             0              0           恰好 0           154
     IDreamer 每一格都是**恰好 0**
+
+注意 2 跳那一行的三列**不一致**，这是对的，而且信息量最大：
+
+  - `动作(t)` / `logprob(t)`：**恰好 0** —— actor 只有 1 层 GNN，2 跳外没有通路，
+    掩码是硬的（774 个样本上一个非零值都没有）。
+  - `deter(t+1)` = 0.112%、`动作(t+1)` = 0.82%：**非零**，因为 `deter` 的 reach
+    其实是 **2 跳**，不是 1 跳。
+
+### `deter(t+1)` 为什么是 2 跳：两段 GNN 分处两个时刻
+
+这不是"空间上多传了一跳"，也不是图随时间变化造成的。**决定性证据是消融**
+（SEG，静态图，同一批 108 个 2 跳样本）：
+
+    rssm=1 head=1 behavior=1   2 跳 deter = 0.000281         非零
+    rssm=1 head=0 behavior=0   2 跳 deter = 恰好 0
+    rssm=0 head=0 behavior=1   2 跳 deter = 恰好 0
+
+**两段缺一不可**，所以路径必然是复合的：
+
+    扰动 obs_t[j]
+      → stoch_t[j] 变
+      → 【图 t 上的 actor GNN】把 j 的信息传给 action_t[m]，m ∈ N_t(j)     ← 第 1 跳
+      → action_t 是 t+1 时刻 GRU 的**输入**（`x = cat([prev_stoch, prev_action])`）
+      → GRU_m 的输出变
+      → 【图 t+1 上的 RSSM GNN】再聚合一跳                                  ← 第 2 跳
+      → deter_{t+1}
+
+**与图是否随时间变化无关**：SEG 的邻接矩阵只在 `reset()` 里采样一次
+（`envs/seg.py:243`），`step()` 从不重采样，局内是静态的，而现象照旧。
+3 跳恰好为 0 也自洽 —— 那需要第三段 GNN。
+
+⚠️ **一处被实测否掉的解释，记在这里免得有人重新发明它**：曾把这条写成
+"i 的 `deter_t` 里已经有 j 的信息，GRU 把它带到了 t+1"。**这是错的** ——
+`deter_t` 可证不受 `obs_t` 影响（它由 `state_{t-1}` 算出，见上一节）。
+载体是 `action_t`，而且它走的是 GRU 的**动作输入**，不是循环状态。
+
+**结构性的主张必须落在 logprob 这一列上，不能落在翻转率上。** 翻转率是阈值化的量
+（argmax 会把弱影响吃掉），"没测到翻转"既可能是真没通路、也可能只是样本不够；
+而 (i,j) 对在同一局里共享状态、并不独立，有效样本量上限是 局数 × 可用 t 数，
+设计效应可达数倍 —— 样本量论证在这里站不住。logprob 是连续量，于是"恰好没变"
+是一条 **float 精确**断言：真有通路的话第一个样本就会给出非零值。
 
 读法（论文默认 rssm/head/behavior 各 1 层）：
 
   - **动作(t) 的 reach = 1**，2 跳**恰好 0** → actor 自己那层 GNN 只传一跳。
-  - **deter(t+1) 的 reach = 1**，3 跳恰好 0 → RSSM 那层 GNN 也只传一跳
-    （2 跳残留的 0.112% 是**时间上的携带**：那些 agent 在 t 时刻只隔 1 跳，
-    i 的 deter_t 里已经有 j 的信息，GRU 把它带到了 t+1，不是空间上的 2 跳）。
-  - **动作(t+1) 的 reach = 2**，3 跳归零 → RSSM 一跳 + actor 一跳**确实复合**。
+  - **deter(t+1) 的 reach = 2**，3 跳恰好 0 → RSSM 那层本身只传一跳，但它在
+    时间上被 actor 那层**接了一棒**（机制见上一节）。**两段缺一不可**，
+    消融证据在同节。
+  - **动作(t+1) 的 reach = 2**，3 跳归零 → 同样是复合。
 
-所以"k 层 GNN = 同一时刻内传播 k 跳"在**每段内部**成立，而端到端的 reach 是
-各段之和。IDreamer 的逐格严格为零则是这条测量的对照：它证明测到的差异确实来自
-通信，而不是探针自身的耦合。
+所以"k 层 GNN = 在同一时刻内传播 k 跳"在**每段内部**成立，而**端到端的 reach
+不等于单段层数**：两段分处相邻两个时刻的 GNN 会串成一条跨时刻的链
+（actor@t → action_t → RSSM@t+1）。这也意味着**测 reach 时不能只看单段层数**，
+`(rssm, behavior)` 的组合必须以实测为准。
+
+IDreamer 逐格严格为零则是这条测量的对照：它证明测到的差异确实来自通信，
+而不是探针自身的耦合。
 
 ================================================================================
 已知坑（都不是本探针的 bug，但会咬人）
@@ -195,7 +240,27 @@ def run_policy(agent, obs: dict, state, device: str, seed: int):
         # 签名是 _policy(obs, state, training) —— 没有 done 参数。
         out, new_state = agent._policy(tensors, state, False)
     latent, _action = new_state
-    return out["action"].cpu().numpy(), latent["deter"].cpu().numpy(), new_state
+    # logprob 是策略对自己**贪心动作**的对数概率。它是动作侧的**连续**口径 ——
+    # 翻转率是阈值化的（弱影响会被 argmax 吃掉），而连续性让"恰好没变"
+    # 变成一条 float 精确断言，不再依赖样本量。
+    return (
+        out["action"].cpu().numpy(),
+        latent["deter"].cpu().numpy(),
+        out["logprob"].cpu().numpy(),
+        new_state,
+    )
+
+
+def _scalarise(lp: np.ndarray, n_episodes: int, n_agents: int) -> np.ndarray:
+    """把 logprob 整成 (n_episodes, n_agents) 的标量表。
+
+    不同 dist 的 logprob 末维可能是 () 或 (1)。形状对不上时直接炸 ——
+    静默取错列会让整张表变成一个看似合理但无意义的数。
+    """
+    v = np.asarray(lp).reshape(n_episodes, n_agents, -1)
+    if v.shape[-1] != 1:
+        raise SystemExit(f"logprob 末维是 {v.shape[-1]}，期望 1（形状 {np.asarray(lp).shape}）")
+    return v[..., 0]
 
 
 def probe(agent, env, device: str, n_episodes: int, horizon: int, seed: int):
@@ -206,17 +271,27 @@ def probe(agent, env, device: str, n_episodes: int, horizon: int, seed: int):
     # ---- baseline 滚一遍，留下每个时刻的 incoming state ----
     states: list = [None]
     act_base: list = []
+    lp_base: list = []
     for t in range(horizon):
-        act, _det, new_state = run_policy(agent, obs_seq[t], states[t], device, seed + t)
+        act, _det, lp, new_state = run_policy(
+            agent, obs_seq[t], states[t], device, seed + t
+        )
         act_base.append(act)
+        lp_base.append(lp)
         states.append(new_state)
     # 第 t 次调用返回的 deter 记为 D_t。注意 D_t = img_step(states[t]) ——
     # 它由**上一步**的 stoch 决定，与 obs_t 无关（见文件头）。
     det_base = [states[t + 1][0]["deter"].cpu().numpy() for t in range(horizon)]
 
     # 自证：确定性（同一 time step 重跑必须逐位相同）
-    act_re, det_re, _ = run_policy(agent, obs_seq[0], states[0], device, seed + 0)
-    if not (np.array_equal(act_re, act_base[0]) and np.array_equal(det_re, det_base[0])):
+    act_re, det_re, lp_re, _ = run_policy(
+        agent, obs_seq[0], states[0], device, seed + 0
+    )
+    if not (
+        np.array_equal(act_re, act_base[0])
+        and np.array_equal(det_re, det_base[0])
+        and np.array_equal(lp_re, lp_base[0])
+    ):
         raise SystemExit(
             "探针不自洽：同一 (obs, state, seed) 两次前向结果不同。先修确定性再看表。"
         )
@@ -250,6 +325,12 @@ def probe(agent, env, device: str, n_episodes: int, horizon: int, seed: int):
     n_total = np.zeros(shape)         # 图 t+1 上的样本数
     det_delta = np.zeros(shape)
     det_base_sum = np.zeros(shape)
+    # 动作侧的**连续**口径：贪心动作未翻转时，logprob 是同一个动作在两个分布下的
+    # 对数概率，差值就是分布移动的直接度量。翻转率是阈值化的量，弱影响会被 argmax
+    # 吃掉，所以"2 跳恰好没有影响"这条主张必须落在连续量上才不依赖样本量。
+    lp_delta = np.zeros(shape)
+    lp_base_sum = np.zeros(shape)
+    lp_n = np.zeros(shape)
     # 扰动第 t 步；动作看第 t 次调用，deter 看第 t+1 次调用。
     # 第 t+1 次调用的 deter 需要 states[t+1]，而 baseline 只滚了 horizon 次调用
     # （下标 0..horizon-1），所以 t 最大到 horizon-2。
@@ -273,14 +354,14 @@ def probe(agent, env, device: str, n_episodes: int, horizon: int, seed: int):
 
                 # (1) 第 t 次调用：扰动 obs_t → stoch_t 变了，deter_t 不变。
                 #     动作在这一次就可能变（actor 的 GNN 聚合的是含 stoch 的 feat）。
-                act_p_t, _det_ignore, state_p_t1 = run_policy(
+                act_p_t, _det_ignore, lp_p_t, state_p_t1 = run_policy(
                     agent, obs_p, states[t], device, seed + t
                 )
                 # (2) 第 t+1 次调用：喂**原始** obs_{t+1}，但接着扰动过的 state。
                 #     这才是 RSSM 的通信落地的地方 —— deter_{t+1} = img_step(state_p_t1)。
                 #     少了这一步，测到的就只是"隐状态自己随时间的漂移"，
                 #     与扰动无关（实测：IDreamer 会显示出 0.64 的巨大"变化"）。
-                act_p_t1, det_p_t1, _ = run_policy(
+                act_p_t1, det_p_t1, lp_p_t1, _ = run_policy(
                     agent, obs_seq[t + 1], state_p_t1, device, seed + t + 1
                 )
 
@@ -290,6 +371,9 @@ def probe(agent, env, device: str, n_episodes: int, horizon: int, seed: int):
                 b1 = act_p_t1.reshape(n_episodes, n_agents, -1).argmax(-1)
                 d0 = det_base[t + 1].reshape(n_episodes, n_agents, -1)
                 d1 = det_p_t1.reshape(n_episodes, n_agents, -1)
+                # logprob 每个样本一个标量；形状不对就直接炸，别静默取错列
+                l0 = _scalarise(lp_base[t], n_episodes, n_agents)
+                l1 = _scalarise(lp_p_t, n_episodes, n_agents)
 
                 for e in range(n_episodes):
                     # 动作(t) 用图 t；deter(t+1) 与动作(t+1) 用图 t+1
@@ -299,6 +383,13 @@ def probe(agent, env, device: str, n_episodes: int, horizon: int, seed: int):
                         h = int(h_now)
                         act_total[h] += 1
                         act_flip[h] += int(a1[e, i] != a0[e, i])
+                        # 只在贪心动作**没翻**的样本上累计 logprob 差 ——
+                        # 那样两次比的是同一个动作，差值就是纯粹的分布移动。
+                        # 翻转的样本本身就是"移得很大"的证据，另行计数。
+                        if a1[e, i] == a0[e, i]:
+                            lp_delta[h] += abs(float(l1[e, i] - l0[e, i]))
+                            lp_base_sum[h] += abs(float(l0[e, i]))
+                            lp_n[h] += 1
                     if np.isfinite(h_next):
                         h = int(h_next)
                         n_total[h] += 1
@@ -309,11 +400,21 @@ def probe(agent, env, device: str, n_episodes: int, horizon: int, seed: int):
     rel = np.where(det_base_sum > 0, det_delta / np.maximum(det_base_sum, 1e-12), 0.0)
     flip = np.where(act_total > 0, act_flip / np.maximum(act_total, 1), 0.0)
     flip_n = np.where(n_total > 0, act_flip_n / np.maximum(n_total, 1), 0.0)
-    return (rel, flip, flip_n, act_total.astype(int), n_total.astype(int),
-            det_delta, det_base_sum)
+    return {
+        "rel": rel,
+        "flip": flip,
+        "flip_n": flip_n,
+        "cnt_t": act_total.astype(int),
+        "cnt_n": n_total.astype(int),
+        "det_delta": det_delta,
+        "det_base": det_base_sum,
+        "lp_delta": lp_delta,
+        "lp_base": lp_base_sum,
+        "lp_n": lp_n.astype(int),
+    }
 
 
-def assert_zero_comm_control(layers, det_delta, flip, flip_n, counts):
+def assert_zero_comm_control(layers, res):
     """★ 对照：一处 GNN 都没有时，任何跨 agent 的影响都必须**恰好为 0**。★
 
     这是整个探针的"测量本身没坏"证明。它抓的正是我犯过的那个错：把扰动调用的
@@ -324,17 +425,19 @@ def assert_zero_comm_control(layers, det_delta, flip, flip_n, counts):
     if any(v > 0 for v in layers):
         return
     bad = []
-    if float(np.max(det_delta)) != 0.0:
-        bad.append(f"deter 变化 {float(np.max(det_delta)):.3e} != 0")
-    if float(np.max(flip)) != 0.0:
-        bad.append(f"当前步动作翻转 {float(np.max(flip)):.4f} != 0")
-    if float(np.max(flip_n)) != 0.0:
-        bad.append(f"下一步动作翻转 {float(np.max(flip_n)):.4f} != 0")
+    if float(np.max(res["det_delta"])) != 0.0:
+        bad.append(f"deter 变化 {float(np.max(res['det_delta'])):.3e} != 0")
+    if float(np.max(res["flip"])) != 0.0:
+        bad.append(f"当前步动作翻转 {float(np.max(res['flip'])):.4f} != 0")
+    if float(np.max(res["flip_n"])) != 0.0:
+        bad.append(f"下一步动作翻转 {float(np.max(res['flip_n'])):.4f} != 0")
+    if float(np.max(res["lp_delta"])) != 0.0:
+        bad.append(f"logprob 变化 {float(np.max(res['lp_delta'])):.3e} != 0")
     if bad:
         raise SystemExit(
             "对照失败：GNN 层数全为 0（无任何通信），却测到了跨 agent 的影响 ——\n  "
             + "\n  ".join(bad)
-            + f"\n样本数 {counts.tolist()}。这说明探针本身有耦合，先修探针。"
+            + f"\n样本数 {res['cnt_n'].tolist()}。这说明探针本身有耦合，先修探针。"
         )
 
 
@@ -417,28 +520,33 @@ def main() -> int:
     print(f"  {args.episodes} 条轨迹 × {args.horizon} 步  seed={args.seed}  device={args.device}")
     print()
 
-    (rel, flip, flip_n, cnt_t, cnt_n,
-     det_delta_raw, det_base_raw) = probe(
+    res = probe(
         agent, env, device=args.device, n_episodes=args.episodes,
         horizon=args.horizon, seed=args.seed,
     )
-    assert_zero_comm_control(layers, det_delta_raw, flip, flip_n, cnt_n)
+    assert_zero_comm_control(layers, res)
+    rel, flip, flip_n = res["rel"], res["flip"], res["flip_n"]
+    cnt_t, cnt_n = res["cnt_t"], res["cnt_n"]
 
-    print("  跳数   deter(t+1) 相对变化   绝对变化 / 基准        "
-          "动作(t) 翻转   动作(t+1) 翻转     样本数(t / t+1)")
-    print("  " + "-" * 96)
+    print("  跳数   deter(t+1) 相对变化   动作(t) 翻转   动作(t+1) 翻转   "
+          "logprob 相对变化    样本数(t / t+1)")
+    print("  " + "-" * 104)
     for h in range(len(rel)):
+        lp_rel = (
+            res["lp_delta"][h] / res["lp_base"][h] if res["lp_base"][h] > 0 else 0.0
+        )
         print(
-            f"  {h:<5d}  {rel[h]:>17.6f}   "
-            f"{det_delta_raw[h]:>10.3e} / {det_base_raw[h]:>10.3e}   "
-            f"{flip[h]:>11.4f}   {flip_n[h]:>12.4f}   "
-            f"{cnt_t[h]:>7d} / {cnt_n[h]:>6d}"
+            f"  {h:<5d}  {rel[h]:>17.6f}   {flip[h]:>11.4f}   {flip_n[h]:>12.4f}   "
+            f"{lp_rel:>15.3e}   {cnt_t[h]:>7d} / {cnt_n[h]:>6d}"
         )
     print()
-    print("  deter(t+1) = 扰动 obs_t 之后，再走一步看到的隐状态变化")
+    print("  deter(t+1) = 扰动 obs_t 之后，再走一步看到的隐状态变化（连续量）")
     print("              → 只反映 RSSM 里的通信，reach 应等于 rssm 层数")
-    print("  动作(t)    = 同一时刻的动作变化 → 只反映 actor 里的通信")
+    print("  动作(t)    = 同一时刻的动作翻转率（阈值化量）")
     print("  动作(t+1)  = 两步之和 → reach 应等于 rssm + behavior 层数")
+    print("  logprob    = 贪心动作未翻转的样本上，策略对自己动作的对数概率变化（连续量）")
+    print("              翻转率是阈值化的、抓不住边缘效应；这条能，而且它在"
+          "『恰好没变』上是 float 精确的")
     print("  跳数 0 不会出现（i≠j）。不可达的 (i,j) 对已跳过。")
     env.close()
     return 0
