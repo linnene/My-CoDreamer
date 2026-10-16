@@ -105,17 +105,24 @@ class _NoDataset:
 def _env_spec(cfg) -> tuple:
     """该 suite 的环境规格键（`seg_*` / `vmas_*` / `foraging_*`），按键名排序。
 
-    **不要写死 `seg_*`。** 这里原先写的是 `cfg.seg_num_agents, cfg.seg_graph_obs,
-    cfg.seg_num_actions, cfg.seg_horizon`，对 seg 之外的 suite 会取值到 yaml 里那份
-    与本次实验无关的默认值 —— 于是两个只差 agent 数的 checkpoint 算出**同一个**
-    config_key，不重建模型，静默地拿错误的架构去评测。日志照样好看。
-    这与本项目记录过的几类静默错误同源（"护栏本身是假的"）。
-
-    改成按 `task` 的第一段取前缀后，任何新 suite 只要把自己的规格键命名成
-    `<suite>_*` 就自动被覆盖。
+    **只用于打印，不再用于判结构** —— 判结构改用 `_arch_key`（权重形状表）。
+    枚举 config 键这条路已经证明会漏：写死 `seg_*` 时对别的 suite 取到的是
+    yaml 里与本 run 无关的默认值；改成按前缀取之后，任何**没被命名成
+    `<suite>_*` 的**结构性旋钮仍然漏得掉。形状表不会漏。
     """
     prefix = cfg.task.split("_", 1)[0] + "_"
     return tuple((k, getattr(cfg, k)) for k in sorted(vars(cfg)) if k.startswith(prefix))
+
+
+def _arch_key(ckpt) -> tuple:
+    """权重形状表 —— 模型结构的**机械完备**指纹。
+
+    它直接回答"这份权重装不装得进当前模型"，而那正是重建决策唯一要问的问题。
+    相比之下枚举 config 键只能覆盖"想得到的那些"旋钮。
+    """
+    return tuple(
+        sorted((k, tuple(v.shape)) for k, v in ckpt["agent_state_dict"].items())
+    )
 
 
 def load_checkpoint(path: pathlib.Path, device: str):
@@ -291,18 +298,20 @@ def main() -> int:
     active_key = None
     n_params = 0
 
-    def config_key(cfg):
-        """模型结构相关的超参。变了就必须重建模型。"""
-        return (
-            cfg.task, cfg.comm_variant,
-            cfg.gnn_layers, cfg.gnn_head_layers, cfg.gnn_behavior_layers,
-            cfg.gnn_heads,
-            # num_agents / num_actions 是**运行时从环境读出**再写进 checkpoint 的
-            # （dreamer.py:513 与 :543），所以对任何 suite 都反映真实环境。
-            cfg.num_agents, cfg.num_actions,
-            _env_spec(cfg),
-            cfg.dyn_stoch, cfg.dyn_deter, cfg.units,
-        )
+    def config_key(cfg, ckpt):
+        """模型结构指纹。变了就必须重建模型。
+
+        ★ 用**权重形状表**，不是枚举 config 键 ★
+
+        枚举法（无论写死 `seg_*` 还是按 task 前缀取）永远会漏：漏过的有
+        `seg_obs_mode`（local→oracle 会把观测维从 d 变成 n·d，是结构性的），
+        下一个还不知道是什么。而 `agent_state_dict` 的形状表**机械完备** ——
+        它直接回答 config_key 唯一想问的问题：这份权重装不装得进当前模型。
+
+        `task` 与 `comm_variant` 留在 key 里只是为了重建时打印得好看；
+        结构上的差异已经全部被形状表覆盖。
+        """
+        return (cfg.task, cfg.comm_variant, _arch_key(ckpt))
 
     results = []
     seeds = set()
@@ -313,7 +322,7 @@ def main() -> int:
         cfg.eval_episode_num = args.episodes
         seeds.add(cfg.seed)
 
-        key = config_key(cfg)
+        key = config_key(cfg, ckpt)
         if key != active_key:
             if agent is not None:
                 print(

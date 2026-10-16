@@ -302,37 +302,45 @@ def section_reproducible() -> None:
 
 
 def section_eval_policy_key() -> None:
-    """回归：eval_policy 的 config_key 曾经写死 seg_* 键。
+    """回归：eval_policy 判断"要不要重建模型"的方式。
 
-    症状是静默的 —— 两个只差 agent 数的 checkpoint 会算出同一个 key，
-    于是不重建模型，拿错误的架构评测，而日志照样好看。
-    这里把"key 必须随环境规格变化"钉住。
+    这里走过两代错法：
+      1. 写死 `seg_*` 键 —— 对别的 suite 取到 yaml 里与本 run 无关的默认值；
+      2. 按 task 前缀枚举 —— 只覆盖被命名成 `<suite>_*` 的旋钮，改名就漏。
+
+    现行做法是**权重形状表**（`_arch_key`）：它机械完备，因为它直接回答
+    "这份权重装不装得进当前模型"，而那正是重建决策唯一要问的问题。
+    本节钉住的就是"形状变了，key 必须变"。
     """
     print()
-    print("[8] eval_policy 的 config_key 必须随环境规格变化")
+    print("[8] eval_policy 用权重形状表判结构（不再枚举 config 键）")
     sys.path.insert(0, str(REPO / "scripts"))
+    import torch
+
     import eval_policy
 
-    c3 = base_cfg(foraging_num_agents=3)
-    c4 = base_cfg(foraging_num_agents=4)
+    def fake_ckpt(shapes):
+        return {"agent_state_dict": {k: torch.zeros(s) for k, s in shapes.items()}}
 
-    s3, s4 = eval_policy._env_spec(c3), eval_policy._env_spec(c4)
-    check("_env_spec 取到的是 foraging_* 而不是 seg_*",
-          all(k.startswith("foraging_") for k, _ in s3) and len(s3) > 5,
-          f"{len(s3)} 个键")
-    check("_env_spec 不含任何 seg_ / vmas_ 键",
-          not any(k.startswith(("seg_", "vmas_")) for k, _ in s3))
-    check("agent 数不同 → 规格不同（不会再被判成同一结构）", s3 != s4)
+    a = fake_ckpt({"_wm.encoder._mlp.0.weight": (64, 21), "x": (4,)})
+    b = fake_ckpt({"_wm.encoder._mlp.0.weight": (64, 36), "x": (4,)})   # 观测维变了
+    c = fake_ckpt({"_wm.encoder._mlp.0.weight": (64, 21), "x": (4, 5)})
+    d = fake_ckpt({"_wm.encoder._mlp.0.weight": (64, 21), "x": (4,)})
 
-    # 同样的规则对已有两个 suite 也成立
+    check("观测维变了 → key 变（这正是 seg_obs_mode local→oracle 的效果）",
+          eval_policy._arch_key(a) != eval_policy._arch_key(b))
+    check("参数量没变但形状变了 → key 也变", eval_policy._arch_key(a) != eval_policy._arch_key(c))
+    check("完全相同的形状 → key 相同（不会无谓重建）",
+          eval_policy._arch_key(a) == eval_policy._arch_key(d))
+    check("key 里带上了键名（不是只看参数量）",
+          "x" in dict(eval_policy._arch_key(a)))
+
+    # 与旧的枚举法对照：它看不到 seg_obs_mode 之外的**未命名**结构性旋钮
     seg = copy.deepcopy(load_config(["defaults", "codreamer"]))
     seg.task = "seg_seq"
-    vs = copy.deepcopy(seg)
-    vs.task = "vmas_flocking"
-    check("seg 的规格键是 seg_*",
-          all(k.startswith("seg_") for k, _ in eval_policy._env_spec(seg)))
-    check("vmas 的规格键是 vmas_*",
-          all(k.startswith("vmas_") for k, _ in eval_policy._env_spec(vs)))
+    named = eval_policy._env_spec(seg)
+    check("_env_spec 仍然可用（只用于打印）",
+          any(k == "seg_obs_mode" for k, _ in named))
 
 
 def main() -> int:

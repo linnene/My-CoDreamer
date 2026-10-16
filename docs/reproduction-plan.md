@@ -244,7 +244,7 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `configs.yaml` | 新增 `value_bootstrap`（默认 `'online'`） | 诊断（2026-10-15） | `# [CoDreamer]` |
 | `dreamer.py` | `make_env` 增加 `foraging` 分支（队伍级环境，直接返回，不接 gym wrapper 链） | 演示环境（2026-10-16） | `# [CoDreamer]` |
 | `configs.yaml` | `codreamer` 块新增 `foraging_*` 16 个键（num_agents / field_size / max_food / sight / max_steps / force_coop / 等级 / 通信半径 / 图开关 …） | 演示环境（2026-10-16） | `# [CoDreamer]` |
-| `scripts/eval_policy.py` | `config_key` 与打印行原先写死 `seg_*` 键，对别的 suite 会取到 yaml 里无关的默认值 —— 两个只差 agent 数的 checkpoint 会算出**同一个** key，于是不重建模型、静默地用错误架构评测。改为按 `task` 首段取前缀（`_env_spec`）+ 运行时写进 checkpoint 的 `num_agents` / `num_actions` | 演示环境（2026-10-16） | `# [CoDreamer]` |
+| `scripts/eval_policy.py` | `config_key` 决定"要不要重建模型"。原先写死 `seg_*` 键，对别的 suite 取到的是 yaml 里与本 run 无关的默认值。**改为用 checkpoint 里 `agent_state_dict` 的权重形状表**（`_arch_key`）—— 枚举 config 键这条路过两代都会漏（写死 `seg_*` 漏；按前缀枚举则漏掉任何没被命名成 `<suite>_*` 的结构性旋钮，`seg_obs_mode` 就是差点漏掉的一个），而形状表机械完备：它直接回答"这份权重装不装得进当前模型"。`_env_spec` 保留但**只用于打印** | 演示环境（2026-10-16） | `# [CoDreamer]` |
 
 > **⚠️ `value_bootstrap: 'slow'` 已被量测否定，不要指望它修好任何东西。**
 > 实测慢目标与在线 critic 只差 **0.19%（IDreamer）/ 0.56%（CoDreamer）**，
