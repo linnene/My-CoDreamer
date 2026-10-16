@@ -191,7 +191,27 @@ actor、critic 共用）会**全部自动带上通信信息**。
 |---|---|---|
 | **Sequential Estimate Game** | 首选。论文自造，Table 1 给了完整规格 | **纯 Python，零依赖** |
 | **VMAS** | 真实 benchmark，向量观测，4060 可跑 | `vmas` 包 |
-| Melting Pot | 像素 + 强 inter-agent 依赖 | ❌ 本地/单机不现实，需 Linux/Docker |
+| Melting Pot | 像素 + 强 inter-agent 依赖 | ⚠️ **下表的理由已过时，见下方更正** |
+
+> **⚠️ 更正（2026-10-16）**：上面那格原先写"❌ 本地/单机不现实，**需 Linux/Docker**"。
+> **那句话是远端还是 Windows 时写的**，而现在的实验机 wyb 就是 **Ubuntu 22.04.5**——
+> **"需 Linux"这条早已不成立，而它被反复引用了好几轮，包括引用给别的会话。**
+>
+> 实测（在 wyb 上核的，2026-10-16）：
+> - `dm-meltingpot 2.2.0` 在 PyPI 上有，但**只有源码包、没有预编译 wheel**；
+> - 源码包用的是**普通 setuptools**（`requires = ["setuptools>=42"]`），**不含 Bazel**；
+> - 关键依赖 `dmlab2d 1.0.0` **有 cp310 manylinux wheel**（1.3 MB，实测可下载）——
+>   编译最重的那块是预编译的。
+>
+> **所以"装不上"没有被证实，而真正没测过的是下面三条**：
+> 1. **`tensorflow` 是硬依赖**（`dm-meltingpot` 的 install_requires 里有），而我们的
+>    conda 环境是 torch 2.4.1 + numpy 1.23.5——同环境放 TF 是已知的冲突源，需要单独环境；
+> 2. **像素观测的吞吐**——这是真正的约束，且**从未测过**；
+> 3. **队伍级包装要自己写**（Melting Pot 是 substrate/scenario API，不是队伍级 gym），
+>    工作量与 `envs/vmas_env.py` 同量级。
+>
+> **教训**：一条按当时环境写下的排除理由，在环境变了之后不会自己失效，但它会继续
+> 被引用——而且引用时看不出它是旧的。**排除理由和结论一样需要注日期与环境。**
 
 Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"表达力"主张**的环境，
 且其 reward / transition **显式依赖邻居** —— 正是我们最关心的性质。
