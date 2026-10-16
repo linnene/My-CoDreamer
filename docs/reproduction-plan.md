@@ -266,6 +266,7 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `scripts/test_graph_pipeline.py` | 数据管线 `(B,T,N,·)` 的**数值恒等**验收（阈值 0） |
 | `envs/overcooked_env.py` | Overcooked 的队伍级包装（含自检） |
 | `scripts/test_team_env_wiring.py` | 队伍级环境接入的**集成点**测试（8 节，纯 CPU） |
+| `scripts/render_overcooked.py` | Overcooked 回放到 GIF/MP4（matplotlib Agg，不依赖显示服务器） |
 | `scripts/probe_comm_reach.py` | **通信探针**：信息从 j 传到 i 吗、走几跳。免训练、无 seed 方差 |
 
 ### 步骤 0 远端实测记录（2026-10-12, Windows + RTX 4060 Laptop 8GB）
@@ -995,6 +996,15 @@ C=2  平均度 1.00/2   全连通 18.4%   全断开  9.1%   ← 默认（= sight
 C=3  平均度 1.50/2   全连通 48.4%   全断开  0.0%   ← 太密
 ```
 
+**局长 35，不是 25 —— 这条也是实测逼出来的。** 用脚本策略追一局：
+
+    第 2 步取洋葱 → 第 5 步下锅 → 第 6 步开火 → 第 10 步煮好
+    → 第 13 步取盘子 → 第 19 步端起汤 → ……
+
+**第 25 步被截断，差两三步没送到。** 9x6 厨房里锅到上菜口有 5 格远，25 步装不下
+一次完整交付（trace 里那一局奖励 0）。提到 35 后同一个策略拿到 **20 分**。
+这也说明"局长够不够"不能靠推，要看一条完整交付链实际用掉多少步。
+
 **一个不显然的机制**：下锅与开火是**两次交互** —— 只有玩家**空手**对锅交互时
 才会 `begin_cooking()`（`overcooked_mdp.py:1168-1172`）。少了第二步
 `cooking_tick` 永远是 -1，汤永远煮不好。自检断言 tick 从 -1 变为非负，
@@ -1198,5 +1208,10 @@ agent 在 t 时刻只隔 1 跳，一边又把它们归为 2 跳。**分类与解
 - `overcooked_env.py` 的 `adjacency` / `edge_features` 是 property，**reset 之前
   访问会炸**（`self._state` 还是 None），于是 `hasattr` 静默返回 False ——
   接线测试因此必须在 reset 之后再查接口面。
-- 渲染：官方有 `state_string`（文本）与 pygame 可视化。**演示视频建议自己写
-  matplotlib 版**，不依赖显示服务器。
+- 渲染：官方有 `state_string`（文本）与基于 **pygame** 的可视化（要显示后端）。
+  `scripts/render_overcooked.py` 用 matplotlib 的 Agg 后端纯离屏出帧，
+  **不碰屏幕也不需要额外系统包**；画面上带**每个 agent 的视野窗口**，
+  "谁看得见什么"因此直接可见 —— 那正是通信要解决的问题。
+- `SoupState.cook_time` 在汤**还没开火**时会抛
+  `ValueError: Recipe is not determined until soup begins cooking` ——
+  未开火时配方没定下来。渲染进度条这类地方要先判 `is_idle` 再读它。

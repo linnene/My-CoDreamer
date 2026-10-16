@@ -46,8 +46,16 @@ Overcooked 煮一锅汤默认要 `cook_time`（通常 20）个 tick。若局长�
 
 `cook_time` 是**可配的**（`overcooked_mdp.py:210`：`if 'cook_time' in conf`），
 所以默认取 **5**：保留"取洋葱 → 下锅 → 等 → 装盘 → 上菜"的完整结构，但不为
-纯等待留出 20 步。局长因此可以压到 20~25，而 `prefill` 必须 ≥ 一局长度，
-短局长同时让 prefill 便宜。
+纯等待留出 20 步。
+
+**但局长不能只按"煮得完"来定。** 默认取 **35**，这个数也是实测逼出来的：用脚本策略
+追一局，完整链条是"第 2 步取洋葱 → 第 5 步下锅 → 第 6 步开火 → 第 10 步煮好 →
+第 13 步取盘子 → 第 19 步端起汤 → 送往上菜口"，**25 步会在差两三步的地方截断**
+（那一局奖励 0）；提到 35 后同一策略拿到 20 分。9x6 厨房里锅到上菜口有 5 格远，
+"局长够不够"要看一条完整交付链实际用掉多少步，推不出来。
+
+`prefill` 必须 ≥ 一局长度，所以局长直接决定最低启动成本 —— 这也是为什么先压
+`cook_time` 与配方，再定局长。
 
 **配方（`recipe`）同理默认只用 1 个洋葱**，而不是经典的 3 个。原因同样是步数：
 3 个洋葱意味着 3 趟"去分发器 → 回锅"，2 人 25 步的预算里光这一项就要 30+ 步，
@@ -130,9 +138,9 @@ class OvercookedTeamEnv:
 
     def __init__(
         self,
-        num_agents: int = 2,
+        num_agents: int | None = None,
         layout: str = "three_player",
-        max_steps: int = 25,
+        max_steps: int = 35,
         cook_time: int = 5,
         recipe: tuple = ("onion",),
         sight: int = 2,
@@ -144,7 +152,7 @@ class OvercookedTeamEnv:
     ) -> None:
         from overcooked_ai_py.mdp.overcooked_mdp import OvercookedGridworld
 
-        self._num_agents = int(num_agents)
+        # self._num_agents 要等布局解析完才知道（见下），这里先不设
         self._max_steps = int(max_steps)
         self._cook_time = int(cook_time)
         self._sight = int(sight)
@@ -158,7 +166,8 @@ class OvercookedTeamEnv:
         self._forced_seed: int | None = None
         self.id = None
 
-        grid = LAYOUTS[layout](self._num_agents)
+        # 布局函数目前忽略参数（人数写在网格的玩家数字里），传 None 即可
+        grid = LAYOUTS[layout](num_agents)
         self._layout = layout
         self._recipe = tuple(recipe)
         self._mdp = OvercookedGridworld.from_grid(
@@ -168,11 +177,15 @@ class OvercookedTeamEnv:
                 "cook_time": self._cook_time,
             },
         )
-        if self._mdp.num_players != self._num_agents:
+        # ★ 人数由**布局**决定 ★（布局里的玩家数字）。传了 num_agents 就只做校验，
+        # 不传就照布局走 —— 二者不一致时报错而不是静默取一个。
+        # 早先这里默认 2 而 layout 默认 three_player，构造必然抛错，纯属自相矛盾。
+        if num_agents is not None and self._mdp.num_players != int(num_agents):
             raise ValueError(
                 f"布局 {layout} 给出 {self._mdp.num_players} 个玩家，"
-                f"与 num_agents={self._num_agents} 不符"
+                f"与 num_agents={num_agents} 不符"
             )
+        self._num_agents = self._mdp.num_players
 
         self.num_agents = self._num_agents
         n = self.num_agents

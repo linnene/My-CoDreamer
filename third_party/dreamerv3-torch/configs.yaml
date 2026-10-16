@@ -293,7 +293,7 @@ codreamer:
   # 所以 envs/overcooked_env.py **不使用**官方编码，自己写限视野特征。
   overcooked_num_agents: 3     # 必须与布局里的玩家数字个数一致
   overcooked_layout: 'three_player'   # three_player(7x5) | cramped_room(5x4, 2 人经典图)
-  overcooked_max_steps: 25
+  overcooked_max_steps: 35
   # 煮一锅汤要多少 tick。默认 20 —— 在 25 步的局长里连一锅都煮不完，任务语义就是
   # 空的（Melting Pot 被否掉正是这个原因）。压到 5 后完整流程第 9 步就能走完。
   overcooked_cook_time: 5

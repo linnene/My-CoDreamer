@@ -501,8 +501,11 @@ def section_comm_reach() -> None:
         ).to(cfg.device)
         agent.requires_grad_(requires_grad=False)
         agent.eval()
+        # 3 个 agent 下 2 跳的 (i,j) 对本来就少（24 局只有约 20 个），
+        # 提到 40 局把 2 跳那一行的样本量抬一档 —— 代价只是 batch 变大，
+        # 前向**次数**不变（循环是按 (t, 有序对) 走的，与局数无关）。
         out = probe_mod.probe(
-            agent, env, device=cfg.device, n_episodes=24, horizon=4, seed=0
+            agent, env, device=cfg.device, n_episodes=40, horizon=4, seed=0
         )
         env.close()
         got = (cfg.gnn_layers, cfg.gnn_head_layers, cfg.gnn_behavior_layers)
@@ -562,10 +565,17 @@ def section_comm_reach() -> None:
         float(r["lp_delta"][2]) == 0.0 and float(r["flip"][2]) == 0.0,
         f"logprob {float(r['lp_delta'][2]):.3e}  翻转 {float(r['flip'][2]):.4f}",
     )
+    # ⚠️ 这里早先写的是"3 跳：deter 恰好为 0"，守卫写成 `shape[0] <= 3 or ...`，
+    # 两头都不对：**行不存在时那个守卫恒真 → 空断言**（正是本节其他地方在防的
+    # "假通过"），而 detail 的 f-string 又会被**提前求值**成 IndexError
+    # （`cond` 的短路救不了 f-string）。而且 3 个 agent 的最大跳数就是 2，
+    # 根本没有第 3 行 —— 这条断言在这个配置下不可能有意义。
+    # 换成对"表覆盖了哪些跳数"的显式断言。
+    n_hops = int(r["det_delta"].shape[0])
     check(
-        "3 跳：下一步 deter 恰好为 0（RSSM 那层也只传 1 跳）",
-        r["det_delta"].shape[0] <= 3 or float(r["det_delta"][3]) == 0.0,
-        f"{float(r['det_delta'][3]):.3e}",
+        "跳数表覆盖 0..2（3 个 agent 最大只能隔 2 跳，没有第 3 行可查）",
+        n_hops == 3,
+        f"{n_hops} 行；2 跳样本 {int(r['cnt_n'][2])}",
     )
     # 复合：RSSM 一跳 + actor 一跳 = 2 跳。下一步的动作在 2 跳上应当仍有影响。
     check(
