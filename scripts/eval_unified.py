@@ -55,24 +55,47 @@ class _SilentLogger:
         pass
 
 
-def _sampled_mode(self, *a, **k):
-    """让 actor.mode() 改吐**采样**动作。
+class _SampledDist:
+    """把一个分布包起来，把它的 `.mode()` 换成 `.sample()`。
 
-    `Dreamer._policy` 在 training=False 时写死 `actor.mode()`（贪心）。论文
-    **没说**评测用贪心还是采样，所以两种都要能跑，才能知道这个未说明项有多敏感。
-    做法是把这个**实例**的 mode 换掉，不动类、不动仓库代码。
+    ⚠️ 第一版**patch 错了对象**：改的是 `agent._task_behavior.actor` 这个 Actor
+    **模块**的 `mode`。但 `Dreamer._policy` 里的 `actor` 是
+        actor = self._task_behavior.actor(feat, graph=graph)   # ← 这是分布
+        action = actor.mode()
+    所以真正被调用的是**分布**的 `.mode()`，模块的 `mode` 从来没人调。
+    后果是 sampled 那一轮**每个数字与 greedy 逐位相同** —— 一个看起来像结果的空操作。
+
+    `__getattr__` 转发其余一切，`_policy` 后面的 `log_prob` 照常工作。
     """
-    return self(*a, **k).sample()
+
+    def __init__(self, dist):
+        self._dist = dist
+
+    def mode(self):
+        return self._dist.sample()
+
+    def __getattr__(self, name):
+        return getattr(self._dist, name)
+
+
+def _patch_sampled(actor_module):
+    """让这个 Actor 模块每次前向都返回 `_SampledDist`。"""
+    def forward(self, *a, **k):
+        return _SampledDist(self._orig_forward(*a, **k))
+
+    actor_module._orig_forward = actor_module.forward
+    actor_module.forward = types.MethodType(forward, actor_module)
 
 
 def rollout(agent, env, env_seed, max_steps, n_agents):
-    """一局。返回每 agent 平均的**未折扣**回报。"""
+    """一局。返回每 agent 平均的**未折扣**回报，以及这条动作轨迹（供自检用）。"""
     env.seed(env_seed)
     obs = env.reset()
     state = None
     total = np.zeros(n_agents, dtype=np.float64)
     done = False
     steps = 0
+    trace = []
     while not done and steps < max_steps:
         flat_done = np.zeros(n_agents, dtype=bool)
         action, state = agent(obs, flat_done, state)
@@ -80,10 +103,12 @@ def rollout(agent, env, env_seed, max_steps, n_agents):
         if torch.is_tensor(acts):
             acts = acts.detach().cpu().numpy()
         idx = np.asarray(acts).argmax(-1).astype(np.int64).reshape(-1)
+        if steps < 5:
+            trace.append(tuple(idx.tolist()))
         obs, reward, done, _ = env.step(idx)
         total += np.asarray(reward, dtype=np.float64).reshape(-1)
         steps += 1
-    return float(total.mean()), steps
+    return float(total.mean()), steps, trace
 
 
 def evaluate(path: pathlib.Path, env_seeds, args) -> dict:
@@ -105,14 +130,27 @@ def evaluate(path: pathlib.Path, env_seeds, args) -> dict:
             raise SystemExit(f"{path} 结构不匹配")
         agent.eval()
         if args.action_mode == "sample":
-            a = agent._task_behavior.actor
-            a.mode = types.MethodType(_sampled_mode, a)
+            _patch_sampled(agent._task_behavior.actor)
         policy = functools.partial(agent, training=False)
+
+        # ★ 自检：干预必须**确实改变了动作** ★
+        # 第一版 patch 错了对象，sampled 那一轮与 greedy **逐位相同**，
+        # 看起来像一个干净的结果。没有这条断言，那个空操作会直接进台账。
+        if args.action_mode == "sample":
+            _, _, tr = rollout(policy, env, int(env_seeds[0]), 5, cfg.num_agents)
+            agent._task_behavior.actor.forward = agent._task_behavior.actor._orig_forward
+            _, _, tr_g = rollout(policy, env, int(env_seeds[0]), 5, cfg.num_agents)
+            _patch_sampled(agent._task_behavior.actor)
+            if tr == tr_g:
+                raise SystemExit(
+                    "自检失败：sample 与 greedy 的前 5 步动作完全相同 —— "
+                    "干预没有生效（几乎一定是 patch 的对象不对）。"
+                )
 
         rets, lens = [], []
         with torch.no_grad():
             for k in env_seeds:
-                r, n = rollout(policy, env, int(k), args.max_steps, cfg.num_agents)
+                r, n, _ = rollout(policy, env, int(k), args.max_steps, cfg.num_agents)
                 rets.append(r)
                 lens.append(n)
         env.close()
