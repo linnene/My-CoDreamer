@@ -161,8 +161,8 @@ class OvercookedTeamEnv:
         num_agents: int | None = None,
         layout: str = "three_player",
         max_steps: int = 35,
-        cook_time: int = 5,
-        recipe: tuple = ("onion",),
+        cook_time: int | None = None,
+        recipe: tuple | None = None,
         reward_mode: str = "sparse",
         sight: int = 2,
         add_agent_index: bool = True,
@@ -175,7 +175,7 @@ class OvercookedTeamEnv:
 
         # self._num_agents 要等布局解析完才知道（见下），这里先不设
         self._max_steps = int(max_steps)
-        self._cook_time = int(cook_time)
+        # self._cook_time 要等布局解析完才知道（标准布局按食材分别给火候），见下
         self._sight = int(sight)
         self._add_agent_index = bool(add_agent_index)
         self._graph_obs = bool(graph_obs)
@@ -192,17 +192,43 @@ class OvercookedTeamEnv:
         self._forced_seed: int | None = None
         self.id = None
 
-        # 布局函数目前忽略参数（人数写在网格的玩家数字里），传 None 即可
-        grid = LAYOUTS[layout](num_agents)
+        # ── 两种布局来源 ────────────────────────────────────────────────────
+        # `LAYOUTS` 里的是**手搓**布局，配方和 cook time 由参数给，适合做受控实验。
+        # 其余的按**库自带的标准布局**加载（`data/layouts/*.layout`，44 个），
+        # 配方、每锅容量、各食材的 cook time 全部来自布局文件本身。
+        #
+        # 用标准布局而不是继续手搓，是因为"任务需不需要协作"这件事不该由我拍脑袋
+        # 设计 —— 库里的 `forced_coordination` / `counter_circuit` 这些是社区用了
+        # 多年的协作基准，而且是不是真强制协作可以**测**出来（见 scripts/oc_solo_test.py）。
         self._layout = layout
-        self._recipe = tuple(recipe)
-        self._mdp = OvercookedGridworld.from_grid(
-            grid,
-            base_layout_params={
-                "start_all_orders": [{"ingredients": list(self._recipe)}],
-                "cook_time": self._cook_time,
-            },
-        )
+        if layout in LAYOUTS:
+            grid = LAYOUTS[layout](num_agents)
+            self._recipe = tuple(recipe or ("onion",))
+            self._cook_time = int(cook_time if cook_time is not None else 5)
+            self._mdp = OvercookedGridworld.from_grid(
+                grid,
+                base_layout_params={
+                    "start_all_orders": [{"ingredients": list(self._recipe)}],
+                    "cook_time": self._cook_time,
+                },
+            )
+        else:
+            if cook_time is not None or recipe is not None:
+                # 静默忽略是最坏的结果：调用方以为改了配方，实际跑的是布局文件里的。
+                raise ValueError(
+                    f"布局 {layout!r} 来自库自带的标准布局，配方与 cook_time 由布局文件"
+                    f"决定，不能再传 cook_time/recipe。要自定义请用 LAYOUTS 里的布局名。"
+                )
+            self._mdp = OvercookedGridworld.from_layout_name(layout)
+            self._recipe = tuple(self._mdp.start_all_orders[0]["ingredients"])
+            # 标准布局可以用 <ingredient>_time 给每种食材不同的火候，此时没有单一的
+            # cook_time 可言；这里取第一种配方的实际值，仅供打印/自检
+            from overcooked_ai_py.mdp.overcooked_mdp import Recipe
+
+            self._cook_time = Recipe(self._recipe).time
+
+        # 每口锅最多放几个料 —— 标准布局里不一定是 3（`recipe_config` 才是权威）
+        self._pot_capacity = int(self._mdp.recipe_config["num_items_for_soup"])
         # ★ 人数由**布局**决定 ★（布局里的玩家数字）。传了 num_agents 就只做校验，
         # 不传就照布局走 —— 二者不一致时报错而不是静默取一个。
         # 早先这里默认 2 而 layout 默认 three_player，构造必然抛错，纯属自相矛盾。
@@ -365,7 +391,24 @@ class OvercookedTeamEnv:
 
     # ------------------------------------------------------------------ 接口
 
+    def _ensure_recipe_config(self) -> None:
+        """把 `Recipe` 的全局配置拨回**本环境**的那一份。
+
+        ⚠️ `Recipe.configure` 写的是**类属性**（`overcooked_mdp.py:160`：`cls._conf`
+        / `cls._cook_time` / …），进程里只有一份。于是构造第二个环境会**悄悄改掉
+        第一个环境**的火候和配方：A 建好、B 建好、再 step A，A 跑的是 B 的配方。
+
+        这在三个优化器各建一个环境的冒烟测试里就会踩到，而且症状是"数字变了但不报错"。
+        所以每次 reset 前拨回来；step 里再查一次，drift 了就拨回去 —— 比对是字典相等，
+        比重新 configure 便宜得多（后者会 `_computed = False`，强制重算全部配方）。
+        """
+        from overcooked_ai_py.mdp.overcooked_mdp import Recipe
+
+        if Recipe._conf != self._mdp.recipe_config:      # noqa: SLF001
+            Recipe.configure(self._mdp.recipe_config)
+
     def reset(self) -> dict:
+        self._ensure_recipe_config()
         if self._forced_seed is not None:
             s = self._forced_seed
         elif self._seed is not None:
@@ -387,6 +430,7 @@ class OvercookedTeamEnv:
         """Args: actions (N,) 整数动作下标。Returns: (obs, reward (N,), done, info)。"""
         from overcooked_ai_py.mdp.actions import Action
 
+        self._ensure_recipe_config()
         n = self.num_agents
         actions = np.asarray(actions).reshape(-1)
         if actions.shape[0] != n:
@@ -442,8 +486,10 @@ class OvercookedTeamEnv:
 #   X 台面   O 洋葱   T 番茄   D 盘子   P 锅   S 上菜口   空格 地板   1..n 出生点
 # ============================================================================
 LAYOUTS = {
-    # 官方内置的经典双人厨房（5x4）
-    "cramped_room": lambda n: [
+    # 借用经典双人厨房（5x4）的网格，但配方压到 1 个洋葱、火候压到几 tick。
+    # **名字故意不叫 `cramped_room`** —— 库自带一个同名的标准布局，重名会让
+    # `LAYOUTS` 静默遮蔽它，别人以为在用经典的 3 洋葱 / cook_time=20，其实不是。
+    "cramped_room_1onion": lambda n: [
         "XXPXX",
         "O  2O",
         "X1  X",
@@ -466,6 +512,44 @@ LAYOUTS = {
         "X 1 2 3 X",
         "X       X",
         "XDXSXXXXX",
+    ],
+    # 三人**强制协作**厨房（8x5）。上面那个是开放厨房，实测**单个 agent 就能拿满分**
+    # （scripts/oc_solo_test.py：全员 20 分、只让 1 号动也是 20 分）—— 另外两个人纯属
+    # 并行加速，没有任何一步需要配合。这个布局把那条路堵死。
+    #
+    # 一条竖着的台面把走道切成**三个互不相通的区域**，资源按区拆开：
+    #
+    #     配料区        锅区           盘+上菜区
+    #     O .  ‖  .  P  .  ‖  .  D
+    #     O 1  ‖  .  2  .  ‖  3  S
+    #     T .  ‖  .  .  .  ‖  .  D
+    #           ↑                ↑
+    #        台面交接          台面交接
+    #
+    #   1 号只有洋葱/番茄，没锅没盘子；2 号只有锅，没料也没盘子；3 号只有盘子和上菜口，
+    #   没料没锅。**三个人谁单独都完不成一条链**，只能隔着台面把东西递过去：
+    #   1 递洋葱给 2 → 2 下锅开火 → 3 递盘子给 2 → 2 盛汤递回给 3 → 3 上菜。
+    #
+    # 为什么不用库自带的 `forced_coordination`：那个只有 2 个玩家，而 2 个 agent 的图
+    # 只有一条边，**没有 2 跳路径** —— 论文"GNN 多跳通信"的卖点在它上面根本测不出来
+    # （scripts/probe_comm_reach.py 的 1 跳/2 跳对比需要 ≥3 个 agent）。库自带布局里
+    # 只有 44 个中的这 2 个是结构上强制交接的，且都是双人，所以这里自己写三人版。
+    #
+    # 配合 **sight=1** 使用：每个 agent 的窗口只覆盖自己那一区（外加相邻的交接台面），
+    # 看不到别人区里发生了什么、也看不到别人手上拿着什么。信息只能靠通信传 ——
+    # 这正是这套算法要证的事。
+    #
+    # ⚠️ **尚未验证到底**。已验证：三个 agent 各自单独行动都拿 0 分（区域确实互不相通、
+    # 资源确实拆开了）。**未验证**：把交接协议写出来跑，全员也是 0 分（scripts/
+    # oc_handoff_test.py），所以"能不能交接"还没有反证 —— 地形上"能交接"和"不能交接"
+    # 长得一模一样，差别在"放上台面、对面再拿起来"这条协议跑不跑得通。
+    # 在把这个 0 分解释清楚之前，别拿它去跑训练。
+    "forced_coordination_3p": lambda n: [
+        "XXXPPXXX",
+        "O X  X D",
+        "O1X 2X3S",
+        "T X  X D",
+        "XXXXXXXX",
     ],
 }
 
@@ -574,7 +658,7 @@ def _self_test() -> None:
           + env._d_other * (n - 1))
 
     # 把两个 agent 放到相距 > sight 的位置，可见标志必须为 0
-    env3 = OvercookedTeamEnv(num_agents=2, layout="cramped_room", sight=1, seed=2)
+    env3 = OvercookedTeamEnv(num_agents=2, layout="cramped_room_1onion", sight=1, seed=2)
     env3.seed(3)
     env3.reset()
     env3._state.players[0].position = (1, 2)
@@ -597,7 +681,7 @@ def _self_test() -> None:
     print("  --- 机制（cook_time 压缩是否让短局长有意义）---")
     from overcooked_ai_py.mdp.actions import Action, Direction
 
-    env4 = OvercookedTeamEnv(num_agents=2, layout="cramped_room", max_steps=40,
+    env4 = OvercookedTeamEnv(num_agents=2, layout="cramped_room_1onion", max_steps=40,
                              cook_time=3, sight=2, seed=4, random_start_pos=False)
 
     def drive(env, targets, budget=40):
@@ -622,8 +706,8 @@ def _self_test() -> None:
 
     env4.seed(0)
     env4.reset()
-    # cramped_room: 洋葱分发器在 (0,1) 与 (4,1)，锅在 (2,0)，盘子 (1,3)，上菜口 (3,3)
-    # 两个 agent 不能站同一格，1 号送去别处待着（cramped_room 的空格很少）
+    # cramped_room_1onion: 洋葱分发器在 (0,1) 与 (4,1)，锅在 (2,0)，盘子 (1,3)，上菜口 (3,3)
+    # 两个 agent 不能站同一格，1 号送去别处待着（cramped_room_1onion 的空格很少）
     check("走到洋葱旁", drive(env4, [(1, 1), (3, 1)]),
           str([p.position for p in env4._state.players]))
     # INTERACT 作用于**面朝**的格子，所以要先转向洋葱所在的那一侧（西）
