@@ -126,7 +126,10 @@ def evaluate(path: pathlib.Path, env_seeds, args) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", action="append", required=True, help="名称=路径")
+    ap.add_argument("--checkpoint", action="append", default=[], help="名称=路径")
+    ap.add_argument("--run-dir", action="append", default=[],
+                    help="名称=目录：评该目录下所有 ckpt_*.pt 与 latest.pt，"
+                         "按 interval 列出并取最大值（论文的选择规则）")
     ap.add_argument("--episodes", type=int, default=32)
     ap.add_argument("--seed-base", type=int, default=0)
     ap.add_argument("--max-steps", type=int, default=500)
@@ -138,6 +141,32 @@ def main() -> int:
     print(f"固定局：seed {env_seeds[0]}..{env_seeds[-1]}（共 {len(env_seeds)} 局，"
           f"全部 checkpoint 共用）")
     print(f"动作选择：{args.action_mode}   单局上限：{args.max_steps} 步\n")
+
+    # ---------------------------------------------------------- run-dir 模式
+    if args.run_dir:
+        for item in args.run_dir:
+            name, _, d = item.partition("=")
+            d = pathlib.Path(d)
+            cks = sorted(d.glob("ckpt_*.pt"))
+            if (d / "latest.pt").exists():
+                cks.append(d / "latest.pt")
+            if not cks:
+                print(f"{name}: 目录里没有 ckpt_*.pt（ckpt_every 没打开？）")
+                continue
+            print(f"=== {name} ===  {len(cks)} 个检查点")
+            rows = []
+            for c in cks:
+                r = evaluate(c, env_seeds, args)
+                rows.append((c.stem, r["returns"].mean(),
+                             r["returns"].std(ddof=1), r["variant"]))
+            for nm, m, s, v in rows:
+                print(f"  {nm:<22} mean {m:+.4f}  std {s:.4f}  variant={v}")
+            best = max(rows, key=lambda x: x[1])
+            last = rows[-1]
+            print(f"  → 全程最大（**论文的选择规则**）：{best[0]}  {best[1]:+.4f}")
+            print(f"  → 最终点（我们的选择规则）    ：{last[0]}  {last[1]:+.4f}")
+            print(f"  → 两者之差 {best[1] - last[1]:+.4f}\n")
+        return 0
 
     res = {}
     for item in args.checkpoint:
