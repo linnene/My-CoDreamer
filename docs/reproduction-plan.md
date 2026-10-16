@@ -258,9 +258,20 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 |---|---|
 | `envs/seg.py` | Sequential Estimate Game 本体（纯 numpy） |
 | `envs/seg_gym.py` | 队伍级 gym 包装 |
+| `envs/vmas_env.py` | **VMAS 队伍级包装**（论文正文主实验的环境） |
 | `tools_marl.py` | 多智能体收集循环（N 条独立 episode 流）；队伍归组与**图采样器** `sample_episode_graphs` |
 | `networks_gnn.py` | GATv2 层 + 防过平滑跳连；`GraphAggregator(layers=0)` 是严格恒等 |
 | `scripts/test_graph_pipeline.py` | 数据管线 `(B,T,N,·)` 的**数值恒等**验收（阈值 0） |
+| `scripts/test_training_loop.py` | 回路级断言（预训练/冻结/执行路径带图/消融臂参数量恒等式） |
+| `scripts/eval_world_model.py` | held-out 多步开环误差（训练日志与事后脚本共用的唯一实现） |
+| `scripts/check_critic_calibration.py` | `V(s_t)` vs 真实折扣回报，同一批固定轨迹 |
+| `scripts/check_imagination.py` | prior 前滚时各头输出是否塌缩 |
+| `scripts/check_model_exploitation.py` | 模型对策略自身动作的承诺 vs 环境实际交付 |
+| `scripts/ablation_comm.sh` | 四臂通信消融（含参数量恒等式机械检查） |
+
+> ⚠️ 上面这张表**曾经漏登 `envs/vmas_env.py`**——正文里提过三次、表里没有。
+> 是另一个会话的 `scripts/check_change_list.py` 用 `git diff` 对着表机械比对时查出来的。
+> **人工登记的清单会漏，这正是要在合并前跑一次那个检查器的理由。**
 
 ### 步骤 0 远端实测记录（2026-10-12, Windows + RTX 4060 Laptop 8GB）
 
