@@ -242,6 +242,9 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `configs.yaml` | 新增 `ckpt_every`（默认 0） | 诊断（2026-10-15） | `# [CoDreamer]` |
 | `models.py` | `_compute_target` 的 λ-return 自举项可用 `value_bootstrap: 'slow'` 换成慢目标。**上游把在线 critic 同时用作自举与中间混合项**，而慢目标只出现在损失正则里 —— 目标因此没有外部锚。实测症状：`target_mean ≡ value_mean`、V 与真实回报相关 0.03、价值膨胀到每步奖励的 ~1000 倍且不收敛、actor advantage 归零。默认 `'online'` = 与上游逐位一致 | 诊断（2026-10-15） | `# [CoDreamer]` |
 | `configs.yaml` | 新增 `value_bootstrap`（默认 `'online'`） | 诊断（2026-10-15） | `# [CoDreamer]` |
+| `dreamer.py` | `make_env` 增加 `foraging` 分支（队伍级环境，直接返回，不接 gym wrapper 链） | 演示环境（2026-10-16） | `# [CoDreamer]` |
+| `configs.yaml` | `codreamer` 块新增 `foraging_*` 16 个键（num_agents / field_size / max_food / sight / max_steps / force_coop / 等级 / 通信半径 / 图开关 …） | 演示环境（2026-10-16） | `# [CoDreamer]` |
+| `scripts/eval_policy.py` | `config_key` 与打印行原先写死 `seg_*` 键，对别的 suite 会取到 yaml 里无关的默认值 —— 两个只差 agent 数的 checkpoint 会算出**同一个** key，于是不重建模型、静默地用错误架构评测。改为按 `task` 首段取前缀（`_env_spec`）+ 运行时写进 checkpoint 的 `num_agents` / `num_actions` | 演示环境（2026-10-16） | `# [CoDreamer]` |
 
 > **⚠️ `value_bootstrap: 'slow'` 已被量测否定，不要指望它修好任何东西。**
 > 实测慢目标与在线 critic 只差 **0.19%（IDreamer）/ 0.56%（CoDreamer）**，
@@ -261,6 +264,9 @@ Sequential Estimate Game 优先的理由：它是论文**唯一能干净验证"�
 | `tools_marl.py` | 多智能体收集循环（N 条独立 episode 流）；队伍归组与**图采样器** `sample_episode_graphs` |
 | `networks_gnn.py` | GATv2 层 + 防过平滑跳连；`GraphAggregator(layers=0)` 是严格恒等 |
 | `scripts/test_graph_pipeline.py` | 数据管线 `(B,T,N,·)` 的**数值恒等**验收（阈值 0） |
+| `envs/foraging_env.py` | Level-Based Foraging 的队伍级包装（含自检） |
+| `scripts/test_foraging_wiring.py` | LBF 接入的**集成点**测试（8 节，纯 CPU） |
+| `scripts/probe_comm_reach.py` | **通信探针**：信息从 j 传到 i 吗、走几跳。免训练、无 seed 方差 |
 
 ### 步骤 0 远端实测记录（2026-10-12, Windows + RTX 4060 Laptop 8GB）
 
@@ -932,3 +938,110 @@ IDreamer 最差 −2.6。CoDreamer 有四次低于 −5.5，IDreamer 零次。
 `torch.compile` 只拦 `forward`，而 RSSM 里那两段计算在独立方法中，从未被编译到）
 约 3%（n=2，区间 2%~5%，本底 1%~2%，刚过本底）。**上界 1.27×，兑现 1.03×。**
 对"分辨 d≈1 需要 25 seed/臂"的项目来说，优先投 seed 而不是继续推这条路径。
+
+---
+
+## 演示环境的选型与通信探针（2026-10-16）
+
+> 目标：找一个**简单的多人协作游戏**，把算法接上去，让"通信在起作用"这件事
+> 能直接看出来，而不是靠一条噪声很大的回报曲线。分支 `feat/foraging-demo`。
+
+### 选型：Level-Based Foraging（LBF）
+
+判据不是"好不好玩"，而是**不通信在信息论上是否做不到**。VMAS flocking 之所以
+分不出变体，除了有效视界那条机制，还有一个结构原因：它的 lidar 只留非 agent 实体，
+agent 互相完全不可见，而奖励是成对距离的 potential shaping —— **每个 agent 看自己
+那一份观测就够**，通信因此是冗余的。冗余通道只能去拟合噪声。
+
+LBF 在**源码层面**给出两件 VMAS 没有的事（`lbforaging/foraging/environment.py`）：
+
+1. `_make_obs` 只取 `neighborhood(*player.position, sight)` 这个 `(2·sight+1)²`
+   窗口，窗外实体填 `(-1,-1,0)` → **B 看得见的食物，对 A 根本不存在**；
+2. 装载要求**同一时刻**选 LOAD、且都贴在同一食物旁的 agent 等级之和 ≥ 食物等级
+   （:670-700）→ 协作不是学出来的习惯，是环境的构造。
+
+`pip install lbforaging` 只多装 `gymnasium`（实测 dry-run 只有它和
+`Farama-Notices` 两项，不动已装的 `gym 0.22.0`）。
+
+**被实测否掉的两个初始设定：**
+
+- `force_coop=True`（每个食物都必须两人同搬）：脚本策略 100 局只拿到 **0.02/1.0**，
+  随机策略恒为 0 —— 任务太硬，低预算下**没有学习信号**。这是 SEG"饱和"的反面，
+  两种都会得到"分不出变体"。
+- `C = sight`：边就等于"互相看得见"，通信只能在双方已经近到能彼此看见时发生，
+  对"找不到的食物"毫无帮助。
+
+**默认值（全部实测选的，不是猜的）：**
+
+```
+食物等级 ∈ {1,2}   等级1 单人可搬（学习信号）；等级2 必须两人（协作收益）
+                  脚本策略实测：等级1 采集率 40%，等级2 **5%** → 95 个百分点的空位
+max_steps = 15     = imag_horizon。15/20/25 的回报 0.198/0.200/0.195 ——
+                   瓶颈是"找不找得到食物"而不是"时间够不够"；短局长还让 prefill 便宜
+C = max(2, field_size//2 − 1)   8x8 → 3。2000 局/格实测：平均度 0.92/2、
+                   全连通 16%、全断开 14%（C=4 时 1.30/2、34%，C=2 时 0.53/2、38%）
+```
+
+⚠️ 那次 C 的测量还留了个教训：先抽 300 局读到 C=3 是 1.23/2，抽到 2000 局是
+0.92/2。**图稀疏度这类量必须多种子大样本**，单次抽样会给出一个看起来很确定的错数。
+
+主指标因此不是总回报，而是**等级 2 食物的采集率**——它直接对应"只有协作才拿得到
+的那部分"，且有明确天花板（100%）。
+
+另：`lbforaging` 2.0.0 的 `spawn_players` 有状态泄漏（只在新位置成功时才写
+`player.position`，而 `_is_empty_location` 会拒绝所有玩家占用的格子），导致
+`reset(seed=k)` 不可重现。已在包装层修（`_clear_positions`），不动已安装的包。
+
+### 通信探针：比"变体间比回报"更合适的仪器
+
+回报对比在这里是坏仪器：σ_seed 3.3 而效应量 0.68~3.65，8 个 seed 才勉强显著，
+而且测的是混合物。探针把问题拆到最小 —— **通信到底传不传得过去，传几跳**。
+它是架构属性，所以**不需要训练、没有 seed 方差**（同一份权重、同一份观测、
+共同随机数），而且**可证伪**：reach 必须等于各段 GNN 层数。
+
+做法：`Dreamer._policy` 是 (obs, state) 的函数，于是同一 incoming state 下跑两次、
+只把 agent j 的**观测内容**换成 agent k 的（保留 j 自己的 one-hot 索引、图不动），
+两次之差就是 j 对 i 的影响。
+
+**实测（foraging_demo，5 agent，C=2，120 条轨迹，随机初始化）：**
+
+| 跳数 | deter(t+1) 相对变化 | 动作(t) 翻转 | 动作(t+1) 翻转 | 样本数 |
+|---|---|---|---|---|
+| IDreamer（对照） | **0** | **0** | **0** | 2628 / 774 / 154 |
+| CoDreamer 1 跳 | 5.11% | 4.19% | 5.26% | 2628 |
+| CoDreamer 2 跳 | 0.112% | **0.0000** | 0.82% | 774 |
+| CoDreamer 3 跳 | **恰好 0** | 0 | 0 | 154 |
+
+读法：**actor 那层 GNN 的 reach = 1**（动作(t) 在 2 跳恰好为 0）；**RSSM 那层
+也是 1**（deter 在 3 跳恰好为 0）；**两者复合后动作的 reach = 2**（动作(t+1) 在
+2 跳还有 0.82%、3 跳归零）。IDreamer 逐格严格为零，证明测到的差异确实来自通信。
+在 seg_seq 与 vmas_flocking 上跑同一份探针，得到同一结构。
+
+### 探针开发中犯的三个错（都靠对照抓出来）
+
+1. **第一版测在 `state=None` 的第一步**，`deter` 对观测恒为常数 —— 因为
+   `obs_step` 里 `deter_t = img_step(prev_state_{t-1}, ...)` **不含 obs_t**，
+   当前观测只进 posterior 的 `stoch`。**RSSM 的通信相对观测晚一步。**
+   症状是两个变体都报 0.000e+00，看起来像"通信没接线"。
+2. **拿扰动调用的 `D_t` 去比 baseline 的 `D_{t+1}`**，测到的是隐状态自己的
+   时间漂移而非扰动 —— 完全没有通信的 IDreamer 因此显示出 0.64 的"巨大变化"。
+   正确做法是扰动后**再走一步**再看 deter。
+3. **所有量按同一时刻的图分组**，而 agent 会移动：t 时刻隔 2 跳、t+1 只隔 1 跳的
+   样本混进了"2 跳"那一行，于是那一行永远不可能是 0。每个量必须按**它自己那一
+   时刻**的图分组。
+
+三条都写成了断言（确定性自证、扰动生效自证、**层数全 0 时跨 agent 影响必须恰好为 0**
+的对照）。第三条对照是关键：它把第 2 类错误从"一份看起来很像结论的表"变成当场报错。
+
+### 已知坑
+
+- `networks.MLP.__init__` 的 `device` 默认值是**字面量 `"cuda"`**（networks.py:706），
+  而 `config.encoder` 里没有这个键 —— 所以整个代码库**在不暴露 CUDA 时连构造都过不去**
+  （`CUDA_VISIBLE_DEVICES=""` 会炸在 `torch.tensor(..., device="cuda")`）。
+- `cfg.comm_variant` 的 yaml 默认是 `'idreamer'`。不显式设它，`codreamer` 的 run 会
+  静默建成 IDreamer，而探针照样打得出一张完整的表 —— 两行一模一样。必须调
+  `dreamer.resolve_comm_variant()`（唯一实现），并把参数量当机械证据打出来。
+- `lbforaging.agents.heuristic_agent` 在 2.0.0 里已损坏（import 旧路径
+  `foraging.environment`），基线要自己写脚本策略。
+- LBF 的渲染基于 `pyglet`（非 pygame）且惰性 import，headless 出帧未验证。
+  **演示视频建议自己写 matplotlib 网格渲染器**，几十行，不依赖显示服务器。
