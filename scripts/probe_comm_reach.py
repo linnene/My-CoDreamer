@@ -333,6 +333,13 @@ def probe(agent, env, device: str, n_episodes: int, horizon: int, seed: int):
     lp_delta = np.zeros(shape)
     lp_base_sum = np.zeros(shape)
     lp_n = np.zeros(shape)
+    # 同一套连续口径，用在**第 t+1 次调用**上（复合 2 跳）。
+    # 这一档原先只有翻转率，但复合信号走过两跳后衰减得翻不动 argmax —— 实测恰好
+    # 0.0000/52 样本，断言因此失败。那是阈值造成的，不是没有传播：同一条主张在
+    # 1 跳那一档早就改成连续量了，这里当时漏了。
+    lp_delta_n = np.zeros(shape)
+    lp_base_n = np.zeros(shape)
+    lp_n_n = np.zeros(shape)
     # 扰动第 t 步；动作看第 t 次调用，deter 看第 t+1 次调用。
     # 第 t+1 次调用的 deter 需要 states[t+1]，而 baseline 只滚了 horizon 次调用
     # （下标 0..horizon-1），所以 t 最大到 horizon-2。
@@ -376,6 +383,8 @@ def probe(agent, env, device: str, n_episodes: int, horizon: int, seed: int):
                 # logprob 每个样本一个标量；形状不对就直接炸，别静默取错列
                 l0 = _scalarise(lp_base[t], n_episodes, n_agents)
                 l1 = _scalarise(lp_p_t, n_episodes, n_agents)
+                l0n = _scalarise(lp_base[t + 1], n_episodes, n_agents)
+                l1n = _scalarise(lp_p_t1, n_episodes, n_agents)
 
                 for e in range(n_episodes):
                     # 动作(t) 用图 t；deter(t+1) 与动作(t+1) 用图 t+1
@@ -398,6 +407,10 @@ def probe(agent, env, device: str, n_episodes: int, horizon: int, seed: int):
                         act_flip_n[h] += int(b1[e, i] != b0[e, i])
                         det_delta[h] += float(np.linalg.norm(d1[e, i] - d0[e, i]))
                         det_base_sum[h] += float(np.linalg.norm(d0[e, i]))
+                        if b1[e, i] == b0[e, i]:
+                            lp_delta_n[h] += abs(float(l1n[e, i] - l0n[e, i]))
+                            lp_base_n[h] += abs(float(l0n[e, i]))
+                            lp_n_n[h] += 1
 
     rel = np.where(det_base_sum > 0, det_delta / np.maximum(det_base_sum, 1e-12), 0.0)
     flip = np.where(act_total > 0, act_flip / np.maximum(act_total, 1), 0.0)
@@ -413,6 +426,9 @@ def probe(agent, env, device: str, n_episodes: int, horizon: int, seed: int):
         "lp_delta": lp_delta,
         "lp_base": lp_base_sum,
         "lp_n": lp_n.astype(int),
+        "lp_delta_n": lp_delta_n,
+        "lp_base_n": lp_base_n,
+        "lp_n_n": lp_n_n.astype(int),
     }
 
 
@@ -528,15 +544,19 @@ def main() -> int:
     cnt_t, cnt_n = res["cnt_t"], res["cnt_n"]
 
     print("  跳数   deter(t+1) 相对变化   动作(t) 翻转   动作(t+1) 翻转   "
-          "logprob 相对变化    样本数(t / t+1)")
-    print("  " + "-" * 104)
+          "logprob(t) 相对    logprob(t+1) 相对   样本数(t / t+1)")
+    print("  " + "-" * 122)
     for h in range(len(rel)):
         lp_rel = (
             res["lp_delta"][h] / res["lp_base"][h] if res["lp_base"][h] > 0 else 0.0
         )
+        lp_rel_n = (
+            res["lp_delta_n"][h] / res["lp_base_n"][h]
+            if res["lp_base_n"][h] > 0 else 0.0
+        )
         print(
             f"  {h:<5d}  {rel[h]:>17.6f}   {flip[h]:>11.4f}   {flip_n[h]:>12.4f}   "
-            f"{lp_rel:>15.3e}   {cnt_t[h]:>7d} / {cnt_n[h]:>6d}"
+            f"{lp_rel:>15.3e}   {lp_rel_n:>17.3e}   {cnt_t[h]:>7d} / {cnt_n[h]:>6d}"
         )
     print()
     print("  deter(t+1) = 扰动 obs_t 之后，再走一步看到的隐状态变化（连续量）")
@@ -544,6 +564,9 @@ def main() -> int:
     print("  动作(t)    = 同一时刻的动作翻转率（阈值化量）")
     print("  动作(t+1)  = 两步之和 → reach 应等于 rssm + behavior 层数")
     print("  logprob    = 贪心动作未翻转的样本上，策略对自己动作的对数概率变化（连续量）")
+    print("  ⚠️ 两列 logprob 才是**判据**，两列翻转率只是参考。翻转率要求影响大到改掉")
+    print("     argmax，弱影响会被吃掉 —— 实测 2 跳的复合影响在 52/52 样本上都有")
+    print("     ~1e-2 的分布移动，翻转率却是 0.0000。用翻转率下结论会得到相反的答案。")
     print("              翻转率是阈值化的、抓不住边缘效应；这条能，而且它在"
           "『恰好没变』上是 float 精确的")
     print("  跳数 0 不会出现（i≠j）。不可达的 (i,j) 对已跳过。")
