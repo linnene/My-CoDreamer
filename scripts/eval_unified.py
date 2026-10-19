@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import pathlib
 import sys
 import tempfile
@@ -172,6 +173,8 @@ def main() -> int:
     ap.add_argument("--seed-base", type=int, default=0)
     ap.add_argument("--max-steps", type=int, default=500)
     ap.add_argument("--action-mode", choices=("greedy", "sample"), default="greedy")
+    ap.add_argument("--save-json", default="",
+                    help="把逐局回报与固定局种子写成 JSON，供 Median/IQM/Mean 聚合")
     ap.add_argument("--device", default="cuda:0")
     args = ap.parse_args()
 
@@ -218,6 +221,15 @@ def main() -> int:
               f"均值局长 {r['lengths'].mean():.1f}")
 
     print("\n" + "=" * 74)
+    if args.save_json:
+        payload = {
+            "episode_seeds": env_seeds.tolist(),
+            "action_mode": args.action_mode,
+            "runs": {k: {"returns": v["returns"].tolist(),
+                         "variant": v["variant"]} for k, v in res.items()},
+        }
+        pathlib.Path(args.save_json).write_text(json.dumps(payload, indent=1))
+        print(f"已写出逐局数据：{args.save_json}")
     # 配对：同一批局，所以逐局作差是合法的（未配对检验会白扔掉配对信息）
     names = list(res)
     if len(names) == 2:
