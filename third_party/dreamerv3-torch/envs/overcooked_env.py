@@ -256,6 +256,10 @@ class OvercookedTeamEnv:
         # 当前订单在 `_orders` 里的下标；reset 时抽样，交付成功后重新抽样
         self._order_index = 0
 
+        # 走道的连通分量，按从左到右排序。随机出生点时**每个 agent 只能落在自己
+        # 那一块**里，理由见 `_place_players`。
+        self._regions = self._walkable_regions()
+
         # 每口锅最多放几个料 —— 标准布局里不一定是 3（`recipe_config` 才是权威）
         self._pot_capacity = int(self._mdp.recipe_config["num_items_for_soup"])
         # ★ 人数由**布局**决定 ★（布局里的玩家数字）。传了 num_agents 就只做校验，
@@ -424,6 +428,65 @@ class OvercookedTeamEnv:
 
     # ------------------------------------------------------------------ 接口
 
+    # ------------------------------------------------------------------ 出生点
+
+    def _walkable_regions(self) -> list[list[tuple[int, int]]] | None:
+        """把走道（空格）按 4 邻连通分成若干块，按 x 从左到右排序。
+
+        返回 None 表示"走道是连通的"（或者块数和人数对不上）—— 那种布局没有
+        "每个 agent 属于哪一块"的概念，交给官方的随机出生点即可。
+        """
+        from collections import deque
+
+        g = self._mdp.terrain_mtx
+        h, w = len(g), len(g[0])
+        seen: set[tuple[int, int]] = set()
+        comps: list[list[tuple[int, int]]] = []
+        for y in range(h):
+            for x in range(w):
+                if g[y][x] != " " or (x, y) in seen:
+                    continue
+                cells = []
+                q = deque([(x, y)])
+                seen.add((x, y))
+                while q:
+                    cx, cy = q.popleft()
+                    cells.append((cx, cy))
+                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        nx, ny = cx + dx, cy + dy
+                        if 0 <= nx < w and 0 <= ny < h and g[ny][nx] == " " \
+                                and (nx, ny) not in seen:
+                            seen.add((nx, ny))
+                            q.append((nx, ny))
+                comps.append(cells)
+        if len(comps) != self._mdp.num_players:
+            return None
+        comps.sort(key=lambda c: min(cx for cx, _ in c))
+        return comps
+
+    def _place_players(self) -> None:
+        """每个 agent 在自己那一块里随机出生。
+
+        ★ 这里的随机不能交给官方的 `get_random_start_state_fn`。★ 它会在**所有**
+        走道格里均匀抽，于是三个 agent 可能挤进同一块、另一块空着 —— 而在强制
+        协作布局里，每个区只有一个角色，走错区的 agent 干不了自己那份活，这一局
+        就**结构上无解**。
+
+        实测代价：演示预热跑满 1200 步，replay 里 16836 条转移**没有一条带奖励**，
+        训练侧 `train_return` 全程 0。而同一份策略在固定出生点下每局 40 分 ——
+        区别只有随机起点这一项。所以随机是在**区内**做，保证每区恰好一个人。
+        """
+        from overcooked_ai_py.mdp.actions import Direction
+
+        self._state = self._mdp.get_standard_start_state()
+        for i, cells in enumerate(self._regions):
+            x, y = cells[int(self._rng.integers(0, len(cells)))]
+            p = self._state.players[i]
+            p.position = (x, y)
+            p.orientation = Direction.ALL_DIRECTIONS[
+                int(self._rng.integers(0, len(Direction.ALL_DIRECTIONS)))
+            ]
+
     # ------------------------------------------------------------------ 订单
 
     @property
@@ -466,11 +529,18 @@ class OvercookedTeamEnv:
         self._ensure_recipe_config()
         if self._forced_seed is not None:
             s = self._forced_seed
+            # `seed(k)` 的语义是"后续每次 reset 都一模一样"。出生点和订单现在都
+            # 走本环境的 RNG，所以必须在这里**重置 RNG 流**；只固定 s 不够 ——
+            # 连续两次 reset 会拿到 rng 的后继状态，位置就变了（自检抓到过）。
+            self._rng = np.random.default_rng(s)
         elif self._seed is not None:
             s = int(self._rng.integers(0, 2**31 - 1))
         else:
             s = None
-        if self._random_start_pos:
+        if self._random_start_pos and self._regions is not None:
+            # 走道被切成"人数"块 -> 每人在自己那块里随机（见 _place_players）
+            self._place_players()
+        elif self._random_start_pos:
             # Overcooked 的随机起局内部用全局 np.random，没有自己的 RNG 句柄 ——
             # 只能从外面固定它，否则"同一批固定局"这条配对评测的前提不成立。
             np.random.seed(0 if s is None else s)
