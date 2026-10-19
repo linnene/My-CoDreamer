@@ -84,7 +84,7 @@ from torch import nn
 
 import tools
 
-__all__ = ["GATv2Layer", "GraphAggregator"]
+__all__ = ["GATv2Layer", "MeanLayer", "GraphAggregator"]
 
 
 class GATv2Layer(nn.Module):
@@ -179,6 +179,72 @@ class GATv2Layer(nn.Module):
         return out
 
 
+class MeanLayer(nn.Module):
+    """一层**均匀平均**聚合 + 原特征跳连 —— GATv2 的对照物。
+
+    为什么需要它：论文只说用 "GNN"（以及 "edge features representing the relative
+    distances between agents"），**没有**说是哪一种聚合算子 —— GAT / GCN /
+    GraphSAGE 都符合文字。我们此前选了 GATv2，这是一个**论文未写死的实现选择**，
+    也是复现差异里剩下最可疑的一处。
+
+    本层把**唯一**的差别限定在聚合方式上：
+
+        GATv2:  y_i = Σ_j softmax_j(a^T LeakyReLU(W_l h_i + W_r h_j + W_e e_ij)) · W_v h_j
+        Mean :  y_i = (1/|N(i)|) Σ_j (W_v h_j + W_e e_ij)
+
+    两者都：加自环、用边特征、带原特征跳连 `[agg, h_i] → W_skip`、LayerNorm、激活。
+    所以参数量同量级、下游结构完全一致，**只有"怎么合并邻居"这一件事不同**。
+
+    `heads` 对平均聚合没有意义，接受但忽略（保持调用签名一致）。
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        edge_dim: int = 0,
+        act: str = "SiLU",
+        norm: bool = True,
+        self_loops: bool = True,
+    ) -> None:
+        super().__init__()
+        self._in = in_dim
+        self._out = out_dim
+        self._edge_dim = edge_dim
+        self._self_loops = self_loops
+        self._lin_v = nn.Linear(in_dim, out_dim, bias=False)
+        self._lin_e = nn.Linear(edge_dim, out_dim, bias=False) if edge_dim > 0 else None
+        self._skip = nn.Linear(in_dim + out_dim, out_dim, bias=False)
+        self._norm = nn.LayerNorm(out_dim, eps=1e-03) if norm else nn.Identity()
+        self._act = getattr(torch.nn, act)()
+        self.apply(tools.weight_init)
+
+    def forward(self, node, adjacency, edge=None):
+        *lead, n, _ = node.shape
+        a = adjacency
+        if self._self_loops:
+            eye = torch.eye(n, device=a.device, dtype=a.dtype)
+            a = torch.clamp(a + eye, max=1.0)
+        mask = a.unsqueeze(-1)                                     # (..., N, N, 1)
+
+        value = self._lin_v(node)                                  # (..., N, D)
+        if self._lin_e is not None:
+            if edge is None:
+                raise ValueError("edge features required but edge=None")
+            # e_ij 加到"第 j 个邻居的价值"上：(..., 1, N, D) + (..., N, N, D)
+            value = value.unsqueeze(-2) + self._lin_e(edge.to(value.dtype))
+        else:
+            value = value.unsqueeze(-2)
+
+        num = (value * mask).sum(dim=-2)
+        den = mask.sum(dim=-2).clamp(min=1.0)                      # 自环保证 >= 1
+        agg = num / den
+
+        out = torch.cat([agg, node], dim=-1)
+        out = self._act(self._norm(self._skip(out)))
+        return out
+
+
 class GraphAggregator(nn.Module):
     """k 层 GATv2 堆叠。`layers == 0` 时是**恒等变换**。
 
@@ -194,16 +260,32 @@ class GraphAggregator(nn.Module):
         heads: int = 1,
         act: str = "SiLU",
         norm: bool = True,
+        aggregator: str = "gatv2",
     ) -> None:
         super().__init__()
         self._layers = int(layers)
         self._edge_dim = int(edge_dim)
-        self.layers = nn.ModuleList(
-            [
-                GATv2Layer(dim, dim, edge_dim=edge_dim, heads=heads, act=act, norm=norm)
-                for _ in range(self._layers)
-            ]
-        )
+        self._aggregator = str(aggregator)
+        if self._aggregator not in ("gatv2", "mean"):
+            raise ValueError(f"unknown aggregator: {aggregator!r} (gatv2|mean)")
+        if self._aggregator == "mean":
+            self.layers = nn.ModuleList(
+                [
+                    MeanLayer(dim, dim, edge_dim=edge_dim, act=act, norm=norm)
+                    for _ in range(self._layers)
+                ]
+            )
+        else:
+            self.layers = nn.ModuleList(
+                [
+                    GATv2Layer(dim, dim, edge_dim=edge_dim, heads=heads, act=act, norm=norm)
+                    for _ in range(self._layers)
+                ]
+            )
+
+    @property
+    def aggregator(self) -> str:
+        return self._aggregator
 
     @property
     def num_layers(self) -> int:

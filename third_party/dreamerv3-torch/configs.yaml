@@ -242,6 +242,11 @@ codreamer:
   comm_variant: 'idreamer'
   gnn_layers: -1           # RSSM 里插几层（论文 1）
   gnn_heads: 1             # GATv2 的注意力头数（论文未给，取 1）
+  gnn_aggregator: 'gatv2'  # gatv2 | mean —— **论文只说 "GNN"，没给聚合算子**
+                           # 这是一个论文未写死的实现选择，也是复现差异里剩下的嫌疑之一。
+                           # mean 是把 GATv2 换成"邻居均匀平均"，其余（自环、边特征、
+                           # 原特征跳连、LayerNorm、激活）逐项保持一致，用于隔离
+                           # "聚合算子"这一个变量。
   gnn_head_layers: -1      # reward / cont 预测头里插几层（论文 1）
                            # 位置：作用在头的 512 维隐层上，而不是 1536 维的输入上
                            # （5·d² 在 1536 维是 1180 万参数，不可能）。

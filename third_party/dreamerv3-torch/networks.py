@@ -32,6 +32,7 @@ class RSSM(nn.Module):
         gnn_layers=0,
         gnn_edge_dim=0,
         gnn_heads=1,
+        gnn_aggregator="gatv2",
     ):
         super(RSSM, self).__init__()
         self._stoch = stoch
@@ -78,6 +79,7 @@ class RSSM(nn.Module):
             edge_dim=gnn_edge_dim,
             heads=gnn_heads,
             norm=norm,
+            aggregator=gnn_aggregator,
         )
 
         img_out_layers = []
@@ -697,6 +699,7 @@ class MLP(nn.Module):
         gnn_layers=0,
         gnn_edge_dim=0,
         gnn_heads=1,
+        gnn_aggregator="gatv2",
     ):
         super(MLP, self).__init__()
         self._shape = (shape,) if isinstance(shape, int) else shape
@@ -745,6 +748,7 @@ class MLP(nn.Module):
             layers=gnn_layers,
             edge_dim=gnn_edge_dim,
             heads=gnn_heads,
+            aggregator=gnn_aggregator,
         )
 
         if isinstance(self._shape, dict):

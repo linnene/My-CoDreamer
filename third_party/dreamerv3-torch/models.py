@@ -289,6 +289,7 @@ class WorldModel(nn.Module):
             gnn_layers=config.gnn_layers,
             gnn_edge_dim=edge_dim,
             gnn_heads=config.gnn_heads,
+            gnn_aggregator=getattr(config, 'gnn_aggregator', 'gatv2'),
         )
         self.heads = nn.ModuleDict()
         if config.dyn_discrete:
@@ -313,6 +314,7 @@ class WorldModel(nn.Module):
             gnn_layers=config.gnn_head_layers,
             gnn_edge_dim=edge_dim,
             gnn_heads=config.gnn_heads,
+            gnn_aggregator=getattr(config, 'gnn_aggregator', 'gatv2'),
         )
         self.heads["cont"] = networks.MLP(
             feat_size,
@@ -328,6 +330,7 @@ class WorldModel(nn.Module):
             gnn_layers=config.gnn_head_layers,
             gnn_edge_dim=edge_dim,
             gnn_heads=config.gnn_heads,
+            gnn_aggregator=getattr(config, 'gnn_aggregator', 'gatv2'),
         )
         # [CoDreamer] 论文："only the reward and terminal state prediction heads use
         # communication, **while the decoder head remains independent**"。
@@ -531,6 +534,7 @@ class ImagBehavior(nn.Module):
             gnn_layers=config.gnn_behavior_layers,
             gnn_edge_dim=getattr(world_model, "edge_dim", 0),
             gnn_heads=config.gnn_heads,
+            gnn_aggregator=getattr(config, 'gnn_aggregator', 'gatv2'),
         )
         self.value = networks.MLP(
             feat_size,
@@ -546,6 +550,7 @@ class ImagBehavior(nn.Module):
             gnn_layers=config.gnn_behavior_layers,
             gnn_edge_dim=getattr(world_model, "edge_dim", 0),
             gnn_heads=config.gnn_heads,
+            gnn_aggregator=getattr(config, 'gnn_aggregator', 'gatv2'),
         )
         if config.critic["slow_target"]:
             self._slow_value = copy.deepcopy(self.value)
