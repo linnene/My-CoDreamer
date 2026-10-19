@@ -354,12 +354,26 @@ def make_env(config, mode, id):
         # 见 envs/overcooked_env.py 的模块 docstring。
         #
         # 注意 agent 数由**布局**决定（布局里的玩家数字），不能在这里覆盖。
+        #
+        # `overcooked_orders` 是一组配方（分号分隔），每局随机抽一张当订单。
+        # 给了它就不再传 `recipe` —— 两个参数同时给的话 env 会以 orders 为准，
+        # 而 `recipe` 被静默忽略，那正是最难查的一类配置错误。
+        orders_spec = str(getattr(config, "overcooked_orders", "") or "").strip()
+        orders = (
+            tuple(
+                tuple(s for s in spec.split(",") if s)
+                for spec in orders_spec.split(";") if spec
+            )
+            if orders_spec else None
+        )
         return overcooked_env.OvercookedTeamEnv(
             num_agents=config.overcooked_num_agents,
             layout=config.overcooked_layout,
             max_steps=config.overcooked_max_steps,
             cook_time=config.overcooked_cook_time,
-            recipe=tuple(s for s in str(config.overcooked_recipe).split(",") if s),
+            recipe=(None if orders else
+                    tuple(s for s in str(config.overcooked_recipe).split(",") if s)),
+            orders=orders,
             reward_mode=config.overcooked_reward_mode,
             sight=config.overcooked_sight,
             seed=config.seed + id,

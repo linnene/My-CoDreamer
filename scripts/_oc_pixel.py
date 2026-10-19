@@ -169,10 +169,15 @@ POT_EMPTY = _grid([
 ])
 
 
-def pot_with_soup(ready: bool, frac: float) -> np.ndarray:
-    """锅里有汤：按进度填充高度，煮好加气泡。"""
+def pot_with_soup(ready: bool, frac: float, ingredient: str = "onion") -> np.ndarray:
+    """锅里有汤：按进度填充高度，煮好加气泡。
+
+    **颜色按配料分**，不是按"熟没熟"分。两种配方下，一锅番茄汤和一锅洋葱汤
+    长得一样的话，回放里就看不出锅区到底做对了没有 —— 而那正是这个任务的核心。
+    "熟没熟"改用气泡表示。
+    """
     a = POT_EMPTY.copy()
-    col = "G" if ready else "Y"
+    col = "M" if ingredient == "tomato" else "Y"
     top = 12 - int(round(max(0.0, min(1.0, frac)) * 5))   # 12 -> 7
     a[top:12, 3:13] = col
     a[top, 3:13] = "#"
@@ -334,7 +339,9 @@ def canvas_from_state(env, show_view: bool = True) -> np.ndarray:
                     ct = soup._cooking_tick
                     total = max(soup.cook_time, 1) if ct >= 0 else 1
                     frac = 0.0 if ct < 0 else min(1.0, (ct + 1) / total)
-                    _blit(canvas, pot_with_soup(ct >= 0 and soup.is_ready, frac), px, py)
+                    ing = soup.ingredients[0] if soup.ingredients else "onion"
+                    _blit(canvas, pot_with_soup(ct >= 0 and soup.is_ready, frac, ing),
+                          px, py)
 
     # 台面上散落的物品
     for (x, y), obj in state.objects.items():

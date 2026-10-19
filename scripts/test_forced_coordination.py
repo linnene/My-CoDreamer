@@ -85,7 +85,7 @@ def main() -> int:
             fail += 1
 
     def make(**kw):
-        params = dict(layout=LAYOUT, recipe=("onion",), cook_time=5,
+        params = dict(layout=LAYOUT, orders=(("onion",), ("tomato",)), cook_time=5,
                       max_steps=MAX_STEPS, sight=1, comm_radius=3.0,
                       random_start_pos=False, seed=0)
         params.update(kw)
@@ -131,6 +131,39 @@ def main() -> int:
     check("C=3 时通信图边数恒为 2（一条链）", set(edges) == {2}, f"边数分布 {dict(Counter(edges))}")
     check("两端 agent 之间恒为 2 跳（多跳通信有地方可验）", set(hop2) == {2},
           f"跳数分布 {dict(Counter(hop2))}")
+
+    # ── 4. 随机订单机制 ────────────────────────────────────────────────
+    #
+    # 只有一种配方时，"配料区有两种蔬菜"是假选择：拿什么丢进锅都一样。有了订单，
+    # 配料区才必须**先读订单**再决定拿哪种。这里验三件事，缺一条机制就不成立。
+    from overcooked_ai_py.mdp.overcooked_mdp import Recipe
+
+    env.reset()
+    pol = HandoffPolicy(env)
+    seen, matched_rewards = set(), []
+    for _ in range(env._max_steps):
+        seen.add(env.current_order)
+        _, r, done, _ = env.step(pol())
+        if r.sum() > 0:
+            matched_rewards.append((env.current_order, float(r.sum())))
+        if done:
+            break
+    check("一局里订单确实会换（至少出现两张）", len(seen) > 1,
+          f"出现过 {sorted(seen)}")
+    check("两种配方都真的能被交付", len(seen) > 1 and len(matched_rewards) > 1,
+          f"交付 {len(matched_rewards)} 锅")
+
+    # 奖励**按订单判**：同一锅汤，对得上订单给分，对不上给 0。
+    env.reset()
+    st = env._state
+    v_onion = env._mdp.get_recipe_value(st, Recipe(("onion",)))
+    v_tomato = env._mdp.get_recipe_value(st, Recipe(("tomato",)))
+    cur = env.current_order
+    wrong = ("tomato",) if cur == ("onion",) else ("onion",)
+    v_wrong = env._mdp.get_recipe_value(st, Recipe(wrong))
+    check("对得上订单的汤有分、对不上的恰好 0 分",
+          v_wrong == 0 and max(v_onion, v_tomato) > 0,
+          f"当前订单 {cur}: 葱汤={v_onion} 番茄汤={v_tomato} 错单={v_wrong}")
 
     # ── 4. 默认 C（= sight = 1）会得到空图 ─────────────────────────────
     #     这不是配置建议，是**必须显式给 comm_radius** 的证据

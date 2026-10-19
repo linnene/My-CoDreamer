@@ -87,11 +87,14 @@ Overcooked 原生**同时**给两路奖励，本包装两路都读，用 `reward
 ================================================================================
 单 agent 的向量 = 三块拼起来：
 
-  [自己]      朝向 one-hot(4) + 手持 one-hot(5)                       =   9
+  [自己]      朝向 one-hot(4) + 手持 one-hot(5) + 当前订单 one-hot(K)  = 9+K
   [窗口]      (2·sight+1)² 个格子，每格 地形 one-hot(8) + 物体 one-hot(6)
-              地形 8 = 7 种 + 出界 1；sight=2 时 25 格                   = 350
+              地形 8 = 7 种 + 出界 1；sight=1 时 9 格                     = 126
   [队友]      其余 N-1 个 agent，每个 (相对 dx, dy) 归一化(2)
               + 可见标志(1) + 手持 one-hot(5)                          = 8·(N-1)
+
+`K` = 订单集合的大小（`orders` 参数）。订单是**全局事实**（真实游戏里订单票贴屏上），
+所以每个 agent 都看得见；没有它，配料区不知道该拿哪种菜，任务无解。
 
 **窗口之外的格子根本不在向量里**（不是填 0 —— 填 0 等于告诉 agent "那里是空的"，
 那也是一种信息）。队友若在窗口外，只有"不可见"这一个比特。
@@ -165,6 +168,7 @@ class OvercookedTeamEnv:
         max_steps: int = 60,
         cook_time: int | None = None,
         recipe: tuple | None = None,
+        orders: tuple | None = None,
         reward_mode: str = "sparse",
         sight: int = 2,
         add_agent_index: bool = True,
@@ -205,29 +209,52 @@ class OvercookedTeamEnv:
         self._layout = layout
         if layout in LAYOUTS:
             grid = LAYOUTS[layout](num_agents)
-            self._recipe = tuple(recipe or ("onion",))
-            self._cook_time = int(cook_time if cook_time is not None else 5)
+            # ── 订单集合 ────────────────────────────────────────────────────
+            # `orders` 是一组**配方**，每局开始时随机抽一个当订单，交付成功后再抽。
+            # 不传就退化成单一配方（老行为）。
+            #
+            # 只看单个配方的话，"两种蔬菜"是没有意义的：agent 拿到什么就往锅里丢，
+            # 对错都一样。有了订单，配料区必须先读订单、再决定拿哪种 —— 而那正是
+            # 三个区域之间**必须通信**的原因（配料区看不到锅，锅区看不到订单来源）。
+            if orders is not None:
+                self._orders = tuple(tuple(o) for o in orders)
+            else:
+                self._orders = (tuple(recipe or ("onion",)),)
+            if not self._orders:
+                raise ValueError("orders 不能为空")
+            # 所有配方都要进 `Recipe.configure`，否则第二个配方根本不存在，
+            # `get_recipe_value` 永远返回 0（实测：只配 onion 时番茄汤恒 0 分）。
             self._mdp = OvercookedGridworld.from_grid(
                 grid,
                 base_layout_params={
-                    "start_all_orders": [{"ingredients": list(self._recipe)}],
-                    "cook_time": self._cook_time,
+                    "start_all_orders": [
+                        {"ingredients": list(o)} for o in self._orders
+                    ],
+                    "cook_time": int(cook_time if cook_time is not None else 5),
                 },
             )
+            self._recipe = self._orders[0]
+            self._cook_time = int(cook_time if cook_time is not None else 5)
         else:
-            if cook_time is not None or recipe is not None:
+            if cook_time is not None or recipe is not None or orders is not None:
                 # 静默忽略是最坏的结果：调用方以为改了配方，实际跑的是布局文件里的。
                 raise ValueError(
                     f"布局 {layout!r} 来自库自带的标准布局，配方与 cook_time 由布局文件"
-                    f"决定，不能再传 cook_time/recipe。要自定义请用 LAYOUTS 里的布局名。"
+                    f"决定，不能再传 cook_time/recipe/orders。要自定义请用 LAYOUTS 里的布局名。"
                 )
             self._mdp = OvercookedGridworld.from_layout_name(layout)
-            self._recipe = tuple(self._mdp.start_all_orders[0]["ingredients"])
+            self._orders = tuple(
+                tuple(o["ingredients"]) for o in self._mdp.start_all_orders
+            )
+            self._recipe = self._orders[0]
             # 标准布局可以用 <ingredient>_time 给每种食材不同的火候，此时没有单一的
             # cook_time 可言；这里取第一种配方的实际值，仅供打印/自检
             from overcooked_ai_py.mdp.overcooked_mdp import Recipe
 
             self._cook_time = Recipe(self._recipe).time
+
+        # 当前订单在 `_orders` 里的下标；reset 时抽样，交付成功后重新抽样
+        self._order_index = 0
 
         # 每口锅最多放几个料 —— 标准布局里不一定是 3（`recipe_config` 才是权威）
         self._pot_capacity = int(self._mdp.recipe_config["num_items_for_soup"])
@@ -246,8 +273,10 @@ class OvercookedTeamEnv:
         self._s = self._sight
         self._win = 2 * self._s + 1
 
-        # 单 agent 观测维
-        self._d_self = 4 + N_OBJECT
+        # 单 agent 观测维。`+ len(self._orders)` 是**当前订单**的 one-hot ——
+        # 订单是全局事实（真实游戏里订单票贴屏上，所有玩家都看得见），所以每个
+        # agent 都有；没有它，配料区根本不知道该拿哪种菜，任务无法完成。
+        self._d_self = 4 + N_OBJECT + len(self._orders)
         self._d_window = self._win * self._win * (N_TERRAIN + N_OBJECT)
         self._d_other = 2 + 1 + N_OBJECT
         dim = self._d_self + self._d_window + self._d_other * (n - 1)
@@ -354,6 +383,8 @@ class OvercookedTeamEnv:
             # 朝向 one-hot（Direction.ALL_DIRECTIONS 的顺序：[N, S, E, W]）
             own[Direction.ALL_DIRECTIONS.index(tuple(p.orientation))] = 1.0
             own[4 + _obj_index(p.held_object)] = 1.0
+            # 当前订单 one-hot —— 放在手部特征之后
+            own[4 + N_OBJECT + self._order_index] = 1.0
             others = np.zeros(self._d_other * (n - 1), dtype=np.float32)
             k = 0
             for j in range(n):
@@ -393,6 +424,28 @@ class OvercookedTeamEnv:
 
     # ------------------------------------------------------------------ 接口
 
+    # ------------------------------------------------------------------ 订单
+
+    @property
+    def current_order(self) -> tuple:
+        """当前订单的配方（配料元组）。"""
+        return self._orders[self._order_index]
+
+    def _draw_order(self) -> None:
+        """抽一张新订单并写进**当前状态**。
+
+        `OvercookedGridworld.get_recipe_value` 判的是 `state.all_orders`
+        （不是 `mdp.start_all_orders`），每局/每次上菜后改写它，就等于换了订单。
+        状态上没有公开的 setter，只能写 `_all_orders`；这是绕过 `GameEngine`
+        直接驱动 mdp 的代价，记在这里免得后来人以为它是只读的。
+
+        注意空列表的语义是"**所有**配方都算数"（`all_orders` 属性里 `else` 分支
+        回落到 `Recipe.ALL_RECIPES`），所以这里不能图省事传空。
+        """
+        from overcooked_ai_py.mdp.overcooked_mdp import Recipe
+
+        self._state._all_orders = [Recipe(self.current_order)]      # noqa: SLF001
+
     def _ensure_recipe_config(self) -> None:
         """把 `Recipe` 的全局配置拨回**本环境**的那一份。
 
@@ -425,6 +478,9 @@ class OvercookedTeamEnv:
             self._state = fn()
         else:
             self._state = self._mdp.get_standard_start_state()
+        # 每局抽一张订单。抽样走本环境的 RNG，所以 `seed()` 能复现同一串订单。
+        self._order_index = int(self._rng.integers(0, len(self._orders)))
+        self._draw_order()
         self._total_reward = 0.0
         return self._make_obs(is_first=True, is_terminal=False)
 
@@ -464,6 +520,12 @@ class OvercookedTeamEnv:
             reward = sparse + shaped
         assert reward.shape == (n,), (reward.shape, n)
         self._total_reward += float(reward.sum())
+        # 稀疏奖励 > 0 当且仅当**交出的汤与订单一致**（`get_recipe_value` 对不在
+        # `all_orders` 里的配方返回 0）。所以它同时是"这次交付算数"的判据：
+        # 换下一张订单；交错了不换，那锅汤白做 —— 这就是订单机制的惩罚。
+        if sparse.sum() > 0.0 and len(self._orders) > 1:
+            self._order_index = int(self._rng.integers(0, len(self._orders)))
+            self._draw_order()
         d = bool(self._mdp.is_terminal(self._state) or self._state.timestep >= self._max_steps)
         obs = self._make_obs(is_first=False, is_terminal=d)
         return obs, reward, d, {"adjacency": self.adjacency}

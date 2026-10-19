@@ -114,8 +114,8 @@ def main() -> int:
     # `random_start_pos=False` 是**必须**的：交接策略把角色按编号写死（1 号在配料区），
     # 而随机起点会把 1 号扔到别的区，三个人的活全错位，整局 0 分。训练时无所谓
     # （策略是学出来的，不是写死的），演示回放不行。
-    env = OvercookedTeamEnv(layout=args.layout, max_steps=60,
-                            cook_time=5, recipe=("onion",),
+    env = OvercookedTeamEnv(layout=args.layout, max_steps=60, cook_time=5,
+                            orders=(("onion",), ("tomato",)),
                             random_start_pos=False, seed=args.seed)
     n = env.num_agents
     rng = np.random.default_rng(args.seed)
@@ -137,10 +137,13 @@ def main() -> int:
             a = (policy() if policy is not None
                  else rng.integers(0, env.action_space.n, size=n))
             _, r, done, _ = env.step(a)
+            # 订单写进标题：它决定了配料区该拿什么，不显示就看不懂回放在干什么。
+            # 用英文是因为 matplotlib 的默认字体没有中文，会渲染成方框。
+            order = "+".join(env.current_order).upper()
             log.append({
                 "state": _copy_state(env),
-                "title": f"ep{ep} step {env._state.timestep}  "
-                         f"reward {env.total_reward:.0f}",
+                "title": f"step {env._state.timestep}   ORDER: {order}   "
+                         f"score {env.total_reward:.0f}",
             })
             if done:
                 break
@@ -212,11 +215,14 @@ class HandoffPolicy:
 
     协议::
 
-        1 号 取洋葱 -> 放上左交接台面
-        2 号 从左台面取洋葱 -> 下锅 -> 装满后开火
+        1 号 按**当前订单**取洋葱或番茄 -> 放上左交接台面
+        2 号 从左台面取料 -> 下锅 -> 装满后开火
         3 号 取盘子 -> 放上右交接台面
         2 号 从右台面取盘子 -> 等汤好 -> 盛汤 -> 放回右台面
         3 号 从右台面取汤 -> 上菜
+
+    订单每交一锅就换一张，所以配料区每步都要重新读 `env.current_order` —— 缓存
+    会让它在下一次取菜时拿错东西，煮出一锅谁都交不出去的汤。
     """
 
     def __init__(self, env):
@@ -225,13 +231,18 @@ class HandoffPolicy:
         self.h, self.w = len(g), len(g[0])
         self.pots = self._cells("P")
         self.onions = self._cells("O")
+        self.tomatoes = self._cells("T")
         self.dishes = self._cells("D")
         self.serve = self._cells("S")[0]
         # 交接墙上的每一格都是槽位。只留中间一格会在"端着汤要放下、槽位却被多余
         # 盘子占着"时死锁 —— 三方互等的那个版本就是这么卡住的。
         self.left_slots = [(2, 1), (2, 2), (2, 3)]
         self.right_slots = [(5, 1), (5, 2), (5, 3)]
-        self.recipe_len = len(env._recipe)
+
+    def _order(self):
+        """(当前订单的配料, 该去哪个分发器)。订单每交一锅就换一次。"""
+        ing = self.env.current_order[0]
+        return ing, (self.onions[0] if ing == "onion" else self.tomatoes[0])
 
     def _cells(self, ch):
         return [(x, y) for y in range(self.h) for x in range(self.w)
@@ -286,36 +297,50 @@ class HandoffPolicy:
         st = self.env._state
         held = [p.held_object.name if p.held_object else None for p in st.players]
         pot = st.objects.get(self.pots[0])
+        # 订单每交一锅就换，所以每步都重新读，不能缓存
+        ingredient, dispensers = self._order()
+        recipe_len = len(self.env.current_order)
         n_in = 0 if pot is None else len(pot.ingredients)
-        full = n_in >= self.recipe_len
+        full = n_in >= recipe_len
         cooking = pot is not None and not pot.is_idle
         ready = pot is not None and pot.is_ready
-        can_take_more = not cooking and not full
+        # ⚠️ 只要还有一锅汤"在路上"，配料区就**不要**开始下一轮。
+        #
+        # 少了这条会有个很隐蔽的竞态：2 号把汤从锅里取出来的那一刻锅就空了，
+        # 配料区于是按**旧订单**去取菜；几步之后 3 号上菜、订单换新，配料区手上
+        # 那棵菜就成了错的，煮出来永远交不出去 —— 整局卡死。实测三个种子从
+        # 340 掉到 260/20/20，后两个种子 300 步只交付了 1 锅。
+        soup_in_flight = (
+            pot is not None
+            or held[1] == "soup" or held[2] == "soup"
+            or any(o.name.startswith("soup") for o in st.objects.values())
+        )
+        can_take_more = not cooking and not full and not soup_in_flight
+
+        def on_left():
+            return self._slot_with(
+                self.left_slots, lambda o: o.name == ingredient)
 
         acts = []
         for i in range(self.env.num_agents):
-            if i == 0:                                    # 配料区
-                if held[0] == "onion":
+            if i == 0:                                    # 配料区：按订单取菜
+                if held[0] == ingredient:
                     free = self._empty_slot(self.left_slots)
                     a = self._approach(0, free[0], (1, 0))[0] if free else Action.STAY
-                elif can_take_more and not self._slot_with(
-                        self.left_slots, lambda o: o.name == "onion"):
-                    a, _ = self._approach(0, self.onions[0], (-1, 0))
+                elif can_take_more and on_left() is None:
+                    a, _ = self._approach(0, dispensers, (-1, 0))
                 else:
                     a = Action.STAY
             elif i == 1:                                  # 锅区
-                if held[1] == "onion":
+                if held[1] == ingredient:
                     a, _ = self._approach(1, self.pots[0], (0, -1))
                 elif held[1] == "dish":
                     a = self._approach(1, self.pots[0], (0, -1))[0] if ready else Action.STAY
                 elif held[1] == "soup":
                     free = self._empty_slot(self.right_slots)
                     a = self._approach(1, free[0], (1, 0))[0] if free else Action.STAY
-                elif can_take_more and self._slot_with(
-                        self.left_slots, lambda o: o.name == "onion"):
-                    a, _ = self._approach(
-                        1, self._slot_with(self.left_slots, lambda o: o.name == "onion"),
-                        (-1, 0))
+                elif can_take_more and on_left() is not None:
+                    a, _ = self._approach(1, on_left(), (-1, 0))
                 elif full and pot.is_idle:
                     a, _ = self._approach(1, self.pots[0], (0, -1))     # 开火
                 elif (cooking or ready) and self._slot_with(
