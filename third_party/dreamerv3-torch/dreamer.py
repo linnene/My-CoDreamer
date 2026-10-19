@@ -593,6 +593,25 @@ def main(config):
     )
     env_cutoff = False
     dataset_at_cutoff = None
+    # [CoDreamer] 检查点粒度受**循环粒度**限制，这个耦合不明显，会静默吞掉检查点。
+    #
+    # 每个循环迭代推进 `eval_every × num_agents` 个 agent 步（多智能体下 batch =
+    # envs × num_agents）。而 ckpt 的落点是 `(logger.step // ckpt_every) * ckpt_every`，
+    # 只在迭代末尾算一次 —— 所以**一次迭代最多留一个检查点**。若
+    # ckpt_every < eval_every × num_agents，实际粒度就是后者，其余落点被跳过。
+    #
+    # 2026-10-17 实测：eval_every=3000、num_agents=4 → 每次迭代 12000 步，
+    # ckpt_every=1200 本想要约 20 个点，实际只得到 2 个（12000、24000）。
+    # 当时唯一的表现是"文件比预期少"，没有任何报错。
+    _iter_agent_steps = int(config.eval_every) * int(getattr(config, "num_agents", 1))
+    if int(getattr(config, "ckpt_every", 0) or 0) > 0 and _iter_agent_steps > config.ckpt_every:
+        print(
+            f"[CoDreamer] ⚠️ 检查点粒度受限：每次迭代推进 {_iter_agent_steps} agent 步"
+            f"（eval_every={config.eval_every} × num_agents={config.num_agents}），"
+            f"大于 ckpt_every={config.ckpt_every} —— 实际粒度将是 "
+            f"{_iter_agent_steps}，不是 {config.ckpt_every}。"
+            f" 想更密就把 eval_every 调小。"
+        )
     while agent._step < config.steps + config.eval_every:
         logger.write()
         if config.eval_episode_num > 0:
