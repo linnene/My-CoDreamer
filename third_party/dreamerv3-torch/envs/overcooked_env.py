@@ -159,8 +159,10 @@ class OvercookedTeamEnv:
     def __init__(
         self,
         num_agents: int | None = None,
-        layout: str = "three_player",
-        max_steps: int = 35,
+        # 默认用**强制协作**布局：`three_player` 那种开放厨房单个 agent 就能通关
+        # （scripts/oc_solo_test.py 实测），拿它当多人协作任务名不副实。
+        layout: str = "forced_coordination_3p",
+        max_steps: int = 60,
         cook_time: int | None = None,
         recipe: tuple | None = None,
         reward_mode: str = "sparse",

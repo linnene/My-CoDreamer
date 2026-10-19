@@ -28,8 +28,10 @@ REPO=${REPO:-/home/wyb/CoDreamer_lbf}
 D3T="$REPO/third_party/dreamerv3-torch"
 LOGDIR=${LOGDIR:-/tmp/runs/oc_smoke}
 STEPS=${STEPS:-2000}
-EP_LEN=35
-PREFILL=40
+# 局长 60：强制协作布局的交付链实测要 27 步才出第一锅（scripts/oc_measure_chain.py），
+# 35 步是原来开放厨房的长度，在这里一锅都交不出去。
+EP_LEN=60
+PREFILL=200
 BATCH_LENGTH=20
 HORIZONS="1 4 16"
 
@@ -51,8 +53,9 @@ cd "$D3T"
 
 python -u dreamer.py --configs codreamer --task overcooked_demo \
   --comm_variant codreamer \
-  --overcooked_max_steps "$EP_LEN" --overcooked_layout three_player \
-  --overcooked_cook_time 5 --overcooked_recipe onion --overcooked_sight 2 \
+  --overcooked_max_steps "$EP_LEN" --overcooked_layout forced_coordination_3p \
+  --overcooked_cook_time 5 --overcooked_recipe onion --overcooked_sight 1 \
+  --overcooked_comm_radius 3.0 \
   --steps "$STEPS" --prefill "$PREFILL" \
   --envs 2 --batch_size 2 --batch_length "$BATCH_LENGTH" --imag_horizon 10 \
   --train_ratio 512 --eval_every 1000 --eval_episode_num 4 --log_every 500 \

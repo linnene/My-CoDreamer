@@ -488,9 +488,11 @@ def section_comm_reach() -> None:
         cfg.task = "overcooked_demo"
         cfg.envs = 1
         cfg.comm_variant = variant
-        # agent 数由布局决定（three_player = 3），不能在这里覆盖。
-        # C=2 是实测选的：9x6 三人厨房上平均度 1.00/2、全连通 18%、全断开 9%。
-        cfg.overcooked_comm_radius = 2.0
+        # agent 数由布局决定（forced_coordination_3p = 3），不能在这里覆盖。
+        # C=3 是实测选的：三个 agent 被锁在 x=1 / x=3..4 / x=6 三个区，切比雪夫距离
+        # 恒为 2~3（相邻区）和 5（两端），所以 C=3 得到**恒定的链**：边数恒为 2，
+        # 两端恒隔 2 跳。C=1 会得到空图（0 条边），2 跳那一行就整个没了。
+        cfg.overcooked_comm_radius = 3.0
         cfg.overcooked_graph_obs = True
         cfg.device = "cpu"          # 与本节其余部分一致，不占 GPU
         cfg.seed = 0

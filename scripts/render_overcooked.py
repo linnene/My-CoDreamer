@@ -95,7 +95,8 @@ def render(states_log, env, out: pathlib.Path, fps: int = 4):
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--layout", default="three_player")
+    p.add_argument("--layout", default="forced_coordination_3p",
+                   help="默认是强制协作厨房；three_player 那种开放厨房单人就能通关")
     p.add_argument("--episodes", type=int, default=6, help="先跑几局挑一局")
     p.add_argument("--pick", type=int, default=-1,
                    help="挑哪一局渲染（默认挑奖励最高的那局）")
@@ -108,7 +109,14 @@ def main() -> int:
 
     from envs.overcooked_env import OvercookedTeamEnv
 
-    env = OvercookedTeamEnv(layout=args.layout, seed=args.seed)
+    # 强制协作厨房的交付链实测 27 步才出第一锅，35 步一锅都交不出去
+    #
+    # `random_start_pos=False` 是**必须**的：交接策略把角色按编号写死（1 号在配料区），
+    # 而随机起点会把 1 号扔到别的区，三个人的活全错位，整局 0 分。训练时无所谓
+    # （策略是学出来的，不是写死的），演示回放不行。
+    env = OvercookedTeamEnv(layout=args.layout, max_steps=60,
+                            cook_time=5, recipe=("onion",),
+                            random_start_pos=False, seed=args.seed)
     n = env.num_agents
     rng = np.random.default_rng(args.seed)
 
@@ -116,7 +124,12 @@ def main() -> int:
     for ep in range(args.episodes):
         env.seed(args.seed + ep)
         env.reset()
-        policy = ScriptedPolicy(env) if args.policy == "scripted" else None
+        # 强制协作厨房要交接协议；开放厨房用通用策略
+        if args.policy == "scripted":
+            policy = (HandoffPolicy(env) if args.layout == "forced_coordination_3p"
+                      else ScriptedPolicy(env))
+        else:
+            policy = None
         log = [{"state": _copy_state(env), "title": f"ep{ep} step 0"}]
         while True:
             # 接上训练好的 policy 时，把这里换成 agent._policy 给出的动作即可
@@ -187,6 +200,150 @@ def _bfs_step(mdp, start, goal, blocked):
     while prev[node] is not None and prev[node][0] != start:
         node = prev[node][0]
     return prev[node][1] if prev[node] is not None else None
+
+
+class HandoffPolicy:
+    """强制协作厨房里的交接协议 —— 三个区域各一个角色。
+
+    这个策略存在的意义不只是"让回放里有人在动"，而是**证明这个布局是可解的**：
+    地形上"能隔台面递东西"和"不能"长得一模一样，差别只在"放上台面、对面再拿起来"
+    这条协议跑不跑得通。实测（`scripts/oc_handoff_test.py`）：三人协作 340 分，
+    任一人单独行动 0 分 —— 后者是这个布局**成立**的证据，不是它坏了。
+
+    协议::
+
+        1 号 取洋葱 -> 放上左交接台面
+        2 号 从左台面取洋葱 -> 下锅 -> 装满后开火
+        3 号 取盘子 -> 放上右交接台面
+        2 号 从右台面取盘子 -> 等汤好 -> 盛汤 -> 放回右台面
+        3 号 从右台面取汤 -> 上菜
+    """
+
+    def __init__(self, env):
+        self.env, self.mdp = env, env._mdp
+        g = self.mdp.terrain_mtx
+        self.h, self.w = len(g), len(g[0])
+        self.pots = self._cells("P")
+        self.onions = self._cells("O")
+        self.dishes = self._cells("D")
+        self.serve = self._cells("S")[0]
+        # 交接墙上的每一格都是槽位。只留中间一格会在"端着汤要放下、槽位却被多余
+        # 盘子占着"时死锁 —— 三方互等的那个版本就是这么卡住的。
+        self.left_slots = [(2, 1), (2, 2), (2, 3)]
+        self.right_slots = [(5, 1), (5, 2), (5, 3)]
+        self.recipe_len = len(env._recipe)
+
+    def _cells(self, ch):
+        return [(x, y) for y in range(self.h) for x in range(self.w)
+                if self.mdp.terrain_mtx[y][x] == ch]
+
+    def _free(self, i):
+        return {p.position for j, p in enumerate(self.env._state.players) if j != i}
+
+    def _approach(self, i, target, face):
+        from overcooked_ai_py.mdp.actions import Action
+
+        me = self.env._state.players[i]
+        if (me.position[0] + face[0], me.position[1] + face[1]) == target:
+            if tuple(me.orientation) != face:
+                return face, False
+            return Action.INTERACT, True
+        spots = [(target[0] - face[0], target[1] - face[1])]
+        for d in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            c = (target[0] + d[0], target[1] + d[1])
+            if 0 <= c[1] < self.h and 0 <= c[0] < self.w \
+                    and self.mdp.terrain_mtx[c[1]][c[0]] == " ":
+                spots.append(c)
+        for walls in (self._free(i), set()):
+            best, bestd = None, None
+            for c in spots:
+                if c in walls or not (0 <= c[1] < self.h and 0 <= c[0] < self.w):
+                    continue
+                if self.mdp.terrain_mtx[c[1]][c[0]] != " ":
+                    continue
+                act = _bfs_step(self.mdp, me.position, c, walls)
+                if act is not None:
+                    d = abs(c[0] - me.position[0]) + abs(c[1] - me.position[1])
+                    if bestd is None or d < bestd:
+                        best, bestd = act, d
+            if best is not None:
+                return best, False
+        return Action.STAY, False
+
+    def _empty_slot(self, slots):
+        return [s for s in slots if s not in self.env._state.objects]
+
+    def _slot_with(self, slots, pred):
+        for s in slots:
+            o = self.env._state.objects.get(s)
+            if o is not None and pred(o):
+                return s
+        return None
+
+    def __call__(self):
+        from overcooked_ai_py.mdp.actions import Action
+
+        st = self.env._state
+        held = [p.held_object.name if p.held_object else None for p in st.players]
+        pot = st.objects.get(self.pots[0])
+        n_in = 0 if pot is None else len(pot.ingredients)
+        full = n_in >= self.recipe_len
+        cooking = pot is not None and not pot.is_idle
+        ready = pot is not None and pot.is_ready
+        can_take_more = not cooking and not full
+
+        acts = []
+        for i in range(self.env.num_agents):
+            if i == 0:                                    # 配料区
+                if held[0] == "onion":
+                    free = self._empty_slot(self.left_slots)
+                    a = self._approach(0, free[0], (1, 0))[0] if free else Action.STAY
+                elif can_take_more and not self._slot_with(
+                        self.left_slots, lambda o: o.name == "onion"):
+                    a, _ = self._approach(0, self.onions[0], (-1, 0))
+                else:
+                    a = Action.STAY
+            elif i == 1:                                  # 锅区
+                if held[1] == "onion":
+                    a, _ = self._approach(1, self.pots[0], (0, -1))
+                elif held[1] == "dish":
+                    a = self._approach(1, self.pots[0], (0, -1))[0] if ready else Action.STAY
+                elif held[1] == "soup":
+                    free = self._empty_slot(self.right_slots)
+                    a = self._approach(1, free[0], (1, 0))[0] if free else Action.STAY
+                elif can_take_more and self._slot_with(
+                        self.left_slots, lambda o: o.name == "onion"):
+                    a, _ = self._approach(
+                        1, self._slot_with(self.left_slots, lambda o: o.name == "onion"),
+                        (-1, 0))
+                elif full and pot.is_idle:
+                    a, _ = self._approach(1, self.pots[0], (0, -1))     # 开火
+                elif (cooking or ready) and self._slot_with(
+                        self.right_slots, lambda o: o.name == "dish"):
+                    a, _ = self._approach(
+                        1, self._slot_with(self.right_slots, lambda o: o.name == "dish"),
+                        (1, 0))
+                else:
+                    a = Action.STAY
+            else:                                         # 盘+上菜区
+                soup_slot = self._slot_with(self.right_slots,
+                                            lambda o: o.name.startswith("soup"))
+                if held[2] == "soup":
+                    a, _ = self._approach(2, self.serve, (1, 0))
+                elif held[2] == "dish":
+                    free = self._empty_slot(self.right_slots)
+                    a = self._approach(2, free[0], (-1, 0))[0] if free else Action.STAY
+                elif soup_slot is not None:
+                    a, _ = self._approach(2, soup_slot, (-1, 0))
+                elif (cooking or ready) and held[1] is None and not self._slot_with(
+                        self.right_slots, lambda o: o.name == "dish"):
+                    # 只在"锅在煮、且锅区手上还没有盘子"时补盘子。少了 `held[1] is None`
+                    # 这一条，它会不停取盘子，把交接槽位占满。
+                    a, _ = self._approach(2, self.dishes[0], (1, 0))
+                else:
+                    a = Action.STAY
+            acts.append(Action.ACTION_TO_INDEX[a])
+        return np.asarray(acts)
 
 
 class ScriptedPolicy:

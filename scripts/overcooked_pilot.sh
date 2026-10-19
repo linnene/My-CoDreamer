@@ -76,8 +76,9 @@ for SEED in $SEEDS; do
     echo "----- $VAR seed=$SEED  $(date +%T) -----"
     python -u dreamer.py --configs codreamer --task overcooked_demo \
       --comm_variant "$VAR" \
-      --overcooked_max_steps 35 --overcooked_layout three_player \
-      --overcooked_cook_time 5 --overcooked_recipe onion --overcooked_sight 2 \
+      --overcooked_max_steps 60 --overcooked_layout forced_coordination_3p \
+      --overcooked_cook_time 5 --overcooked_recipe onion --overcooked_sight 1 \
+      --overcooked_comm_radius 3.0 \
       --steps "$STEPS" --prefill "$PREFILL" \
       --envs 4 --batch_size 4 --batch_length "$BATCH_LENGTH" --imag_horizon 10 \
       --train_ratio 512 --eval_every 2000 --eval_episode_num 4 --log_every 500 \
