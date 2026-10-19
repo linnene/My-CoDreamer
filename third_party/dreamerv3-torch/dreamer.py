@@ -609,16 +609,43 @@ def main(config):
             logprob = random_actor.log_prob(action)
             return {"action": action, "logprob": logprob}, None
 
-        state = collect(
-            random_agent,
-            train_envs,
-            train_eps,
-            config.traindir,
-            logger,
-            limit=config.dataset_size,
-            steps=prefill,
-        )
-        logger.step += prefill * config.action_repeat
+        # ── 演示预热 ────────────────────────────────────────────────────────
+        # 强制协作厨房是硬探索任务：随机策略 200 局拿不到一个正样本，于是 replay
+        # 里全是 0，奖励头学成"恒等于 0"、价值函数恒等于 0、actor 拿不到梯度。
+        # 实测跑 12k 步后 actor 熵仍是均匀上限，实际动作分布也是均匀的（两条独立
+        # 证据）。所以先用脚本策略把**带奖励的轨迹**塞进 buffer，再切回随机探索。
+        #
+        # 只对 overcooked 生效；其余 suite 的 `overcooked_demo_steps` 不存在或为 0，
+        # 行为与上游完全一致。
+        demo_steps = 0
+        if config.task.startswith("overcooked"):
+            demo_steps = min(prefill, int(getattr(config, "overcooked_demo_steps", 0) or 0))
+        if demo_steps > 0:
+            from envs.overcooked_demos import DemoAgent
+
+            print(f"演示预热 {demo_steps} 步（脚本交接策略）…")
+            state = collect(
+                DemoAgent(train_envs, config.num_actions),
+                train_envs,
+                train_eps,
+                config.traindir,
+                logger,
+                limit=config.dataset_size,
+                steps=demo_steps,
+            )
+            prefill -= demo_steps
+        if prefill > 0:
+            state = collect(
+                random_agent,
+                train_envs,
+                train_eps,
+                config.traindir,
+                logger,
+                limit=config.dataset_size,
+                steps=prefill,
+                state=state,
+            )
+        logger.step += (demo_steps + prefill) * config.action_repeat
         print(f"Logger: ({logger.step} steps).")
 
     print("Simulate agent.")

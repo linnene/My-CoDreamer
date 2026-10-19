@@ -46,7 +46,10 @@ HORIZONS="1 4 16"
 # 强制协作厨房的交付链实测第一锅要 27 步（scripts/oc_measure_chain.py），
 # 局长定 60；prefill 必须 >= 一局长度，否则 replay 攒不出完整队伍。
 EP_LEN=60          # = --overcooked_max_steps
-PREFILL=200        # 必须 >= EP_LEN
+# 必须 >= EP_LEN；同时必须 >= `overcooked_demo_steps`，否则演示预热会被截断
+# （`demo_steps = min(prefill, overcooked_demo_steps)`）。默认 200 时那 1200 步
+# 的演示根本跑不满，是个静默的坑，所以这里给到 1600。
+PREFILL=${PREFILL:-1600}
 
 MAX_H=$(echo "$HORIZONS" | tr ' ' '\n' | sort -n | tail -1)
 if [ $((MAX_H + 2)) -gt "$BATCH_LENGTH" ]; then
