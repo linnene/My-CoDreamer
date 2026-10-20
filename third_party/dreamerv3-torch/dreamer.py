@@ -197,6 +197,59 @@ class Dreamer(nn.Module):
         """
         self._world_model_frozen = bool(frozen)
 
+    def _bc_train(self, data):
+        """用演示数据对 actor 做一步行为克隆。
+
+        ================================================================
+        为什么需要它
+        ================================================================
+        Dreamer 的 actor 梯度来自**价值函数在想象隐状态上的输出**。这条链是：
+            真实奖励 -> 奖励头 -> 想象轨迹上的预测奖励 -> 价值函数 -> actor
+        中间隔了两个可学习模型，真实奖励只从最左边注入。
+
+        replay 里正样本占 0.5%（实测 90/16836）时，奖励头在训练数据上
+        `reward_loss=0.0` 完美拟合，但想象轨迹漂到数据分布外，它照样输出
+        0.1/步、峰值 5.0。价值函数把这层外推放大到 `value_mean≈97`，而真实
+        一局最多 40 分。actor 于是朝**模型编出来的**高价值方向收敛（熵
+        1.79→0.2），真实环境里一次都没交出去。
+
+        这不是探索不足，是**模型被利用**（model exploitation）。加步数只会把
+        假奖励拟合得更准。
+
+        行为克隆绕开这条链：直接监督 actor 在演示状态上输出演示动作，不经过
+        奖励头和价值函数。它不改变世界模型，也不改变后续 RL —— 只是给 actor
+        一个**起点**。
+
+        ================================================================
+        实现要点
+        ================================================================
+        - `update=False`：只做前向拿后验特征，**不更新世界模型**
+        - `feat.detach()`：梯度不回流到世界模型，BC 只训 actor
+        - 图用**未折平**的版本：`_wm._train` 里 data 是 (B,T,N,·)，与
+          `dynamics.observe` 的用法一致；折平是 `_imagine` 那条路径才需要的
+        """
+        post, _, _ = self._wm._train(data, update=False)
+        feat = self._wm.dynamics.get_feat(post).detach()
+        graph = models.graph_from_data(data, self._config.device)
+        # 数据集吐出来的是 numpy，actor 的分布要 tensor。`_wm._train` 内部已经
+        # 转过了，但它转的是自己那份副本，这里拿到手的还是原始 dict。
+        action = torch.as_tensor(
+            data["action"], device=self._config.device, dtype=torch.float32
+        )
+        # ⚠️ `RequiresGrad` 必须包住**前向**，不能只包优化器那一步。
+        # `main()` 里对 agent 调过 `requires_grad_(False)`，平时是 `_train` 里的
+        # `with tools.RequiresGrad(self.actor)` 临时打开的；漏掉的话前向建不出
+        # 计算图，boundary 处会报 "element 0 of tensors does not require grad"。
+        with tools.RequiresGrad(self._task_behavior.actor):
+            dist = self._task_behavior.actor(feat, graph=graph)
+            loss = -dist.log_prob(action).mean()
+            metrics = self._task_behavior._actor_opt(
+                loss, self._task_behavior.actor.parameters()
+            )
+        metrics = dict(metrics or {})
+        metrics["bc_loss"] = float(loss.detach())
+        return metrics
+
     def _train(self, data, update_behavior=True, update_world_model=True):
         metrics = {}
         post, context, mets = self._wm._train(data, update=update_world_model)
@@ -618,12 +671,16 @@ def main(config):
         # 只对 overcooked 生效；其余 suite 的 `overcooked_demo_steps` 不存在或为 0，
         # 行为与上游完全一致。
         demo_steps = 0
+        demo_keys: set = set()
         if config.task.startswith("overcooked"):
             demo_steps = min(prefill, int(getattr(config, "overcooked_demo_steps", 0) or 0))
         if demo_steps > 0:
             from envs.overcooked_demos import DemoAgent
 
             print(f"演示预热 {demo_steps} 步（脚本交接策略）…")
+            # 记下预热期间新写入的 episode —— 行为克隆只该在这些数据上做，
+            # 混进随机探索的局会把"随机动作"也一起克隆。
+            before = set(train_eps.keys())
             state = collect(
                 DemoAgent(train_envs, config.num_actions),
                 train_envs,
@@ -633,6 +690,7 @@ def main(config):
                 limit=config.dataset_size,
                 steps=demo_steps,
             )
+            demo_keys = set(train_eps.keys()) - before
             prefill -= demo_steps
         if prefill > 0:
             state = collect(
@@ -678,6 +736,32 @@ def main(config):
         agent.load_state_dict(checkpoint["agent_state_dict"])
         tools.recursively_load_optim_state_dict(agent, checkpoint["optims_state_dict"])
         agent._should_pretrain._once = False
+
+    # ── 演示行为克隆 ────────────────────────────────────────────────────────
+    #
+    # 顺序不能反：**先把世界模型预热好，再做 BC**。actor 吃的是 RSSM 的后验特征，
+    # 世界模型没训过时那些特征是噪声，克隆出来的策略没有意义（相当于让学生抄一份
+    # 用乱码写的答案）。
+    #
+    # 预热这一步平时是由 `_should_pretrain` 在训练循环里触发的；这里显式做掉，
+    # 然后把那个 Once 关掉，免得后面重复预热。
+    bc_updates = int(getattr(config, "overcooked_demo_bc_updates", 0) or 0)
+    if bc_updates > 0 and demo_keys:
+        print(f"演示行为克隆 {bc_updates} 步…")
+        for _ in range(int(config.pretrain)):
+            agent._train(next(train_dataset), update_behavior=False)
+            agent._update_count += 1
+        agent._should_pretrain._once = False
+
+        demo_eps = {k: train_eps[k] for k in demo_keys if k in train_eps}
+        bc_ds = tools_marl.make_graph_dataset(demo_eps, config)
+        losses = []
+        for _ in range(bc_updates):
+            losses.append(agent._bc_train(next(bc_ds))["bc_loss"])
+        print(
+            f"  {len(demo_eps)} 条 agent episode；bc_loss "
+            f"{np.mean(losses[:20]):.4f} -> {np.mean(losses[-20:]):.4f}"
+        )
 
     # make sure eval will be executed once after config.steps
     #
