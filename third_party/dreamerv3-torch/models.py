@@ -410,6 +410,29 @@ class WorldModel(nn.Module):
                     # [CoDreamer] 同上：多智能体时比 embed 多一维 agent 轴
                     assert loss.shape == embed.shape[: loss.dim()], (name, loss.shape)
                     losses[name] = loss
+
+                # [CoDreamer] ★ 奖励头在**先验**特征上也要准 ★
+                #
+                # 训练时奖励头只看后验特征（有观测校正），而 `_imagine` 里查询的是
+                # 先验特征（模型自己滚出来的）。两者不是一个分布，而策略会主动走到
+                # 差距大的地方 —— 实测同一批状态、同一个头：
+                #     后验偏差 +0.0000    先验偏差 +0.2615（训练策略）
+                #     后验偏差 +0.0001    先验偏差 +0.0655（演示策略）
+                # 所以奖励头本身没坏，是**训练和推理喂给它的特征不一样**。加这一项
+                # 就是把这个缝补上：同一个目标值，在后验和先验两套特征上都算一次。
+                #
+                # 先验特征**detach**：只校正奖励头，不借这个损失去改动力学。
+                # 让梯度回流会改变世界模型的预测，那是另一件事，不该混进来。
+                prior_w = float(getattr(self._config, "reward_on_prior", 0.0) or 0.0)
+                if prior_w > 0.0 and "reward" in self.heads:
+                    pfeat = self.dynamics.get_feat(prior).detach()
+                    phead = self.heads["reward"]
+                    ppred = (
+                        phead(pfeat, graph=graph)
+                        if "reward" in self._comm_heads
+                        else phead(pfeat)
+                    )
+                    losses["reward_prior"] = -ppred.log_prob(data["reward"]) * prior_w
                 scaled = {
                     key: value * self._scales.get(key, 1.0)
                     for key, value in losses.items()
